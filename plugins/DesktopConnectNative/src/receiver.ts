@@ -121,7 +121,12 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 
 	const play = () => {
 		// Not loaded (a timeout, the network was gone), a play tries again
-		if (loadFailed) return current && load(current.mediaId, current.mediaType, true);
+		if (loadFailed) {
+			if (current === undefined) return;
+			// Where the phone is: a resumed position, or its seeks meanwhile
+			const at = positionS;
+			return load(current.mediaId, current.mediaType, true).then(() => at > 0 && seek(at));
+		}
 		if (ended !== undefined) {
 			const { mediaId, mediaType, seek: time } = ended;
 			return load(mediaId, mediaType, true).then(() => time !== undefined && seek(time));
@@ -142,7 +147,11 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		PlayState.pause();
 	};
 	const seek = (time: number) => {
-		if (loadFailed) return;
+		// Not loaded: kept for when a play loads it again
+		if (loadFailed) {
+			positionS = time;
+			return;
+		}
 		if (ended !== undefined) {
 			ended.seek = time;
 			return;
@@ -345,7 +354,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		});
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
 			// Like TIDAL's own button: a track a few seconds in starts again
-			if (ended === undefined && positionS > restartAfterS) PlayState.seek(0);
+			if (ended === undefined && !loadFailed && positionS > restartAfterS) PlayState.seek(0);
 			else playerEvent({ type: "previous" });
 			return true;
 		});

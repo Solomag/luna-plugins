@@ -365,8 +365,8 @@ export class ConnectReceiver {
 				return 0;
 		}
 		// Queue commands
-		// A refresh also when no window is known: the first one failed, or the queue was emptied and gets new items
-		if (this.queueInfo === undefined || (this.items.length === 0 && message.command !== "refreshQueue")) {
+		// Also when no window is known (the first one failed, or the queue was emptied): the commands load it
+		if (this.queueInfo === undefined) {
 			this.log("no queue for", message.command);
 			return 1002;
 		}
@@ -486,10 +486,10 @@ export class ConnectReceiver {
 
 	private async loadCloudQueue(message: Json) {
 		this.setServers(message);
-		// A new queue: the old window's position must not stay when the new window fails
-		this.clearItems();
 		const queueInfo = message.queueInfo;
 		if (queueInfo) {
+			// A new queue: the old window's position must not stay when the new window fails
+			this.clearItems();
 			this.queueInfo = {
 				queueId: String(queueInfo.queueId ?? ""),
 				repeatMode: repeatModeOf(queueInfo.repeatMode),
@@ -608,7 +608,19 @@ export class ConnectReceiver {
 	// Moves through the queue: by the phone's or desktop's next/previous (repeat one is skipped), when a track ended
 	// or when a media failed (failed: on to the next one, also with repeat one)
 	private async step(by: 1 | -1, ended: boolean, failed = false) {
-		if (this.index === undefined || this.queueInfo === undefined) return;
+		// No window known (its request failed): load it around the current item first.
+		// When that fails the queue goes on, the phone was told about the error and can try again
+		if (this.index === undefined && this.queueInfo !== undefined && this.media?.itemId !== undefined) {
+			if (!(await this.loadWindow({ itemId: this.media.itemId, mediaId: this.media.mediaId }))) return;
+		}
+		if (this.index === undefined || this.queueInfo === undefined) {
+			// A single media, or one not in the queue: its end is the end
+			if (ended) {
+				this.setPlayerState("IDLE");
+				this.finished = true;
+			}
+			return;
+		}
 		const { repeatMode } = this.queueInfo;
 		if (ended && !failed && repeatMode === "ONE") {
 			// The removed item still plays again, it is the phone's media
@@ -899,16 +911,11 @@ export class ConnectReceiver {
 				return this.toSession(this.playerStatus());
 			}
 			case "ended":
-				if (this.index === undefined) {
-					this.setPlayerState("IDLE");
-					this.finished = true;
-					return;
-				}
 				return this.step(1, true);
 			case "error":
 				this.toSession({ command: "notifyPlaybackError", statusCode: event.message ?? "error" });
 				// The queue goes on past a media that cannot play (unavailable, removed from TIDAL), like TIDAL's own player
-				if (event.unavailable === true && this.index !== undefined && this.failedInARow < maxFailedInARow) {
+				if (event.unavailable === true && this.queueInfo !== undefined && this.failedInARow < maxFailedInARow) {
 					this.failedInARow++;
 					return this.step(1, true, true);
 				}
