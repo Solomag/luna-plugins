@@ -4,6 +4,8 @@ import { randomUUID } from "crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 
 // The TIDAL Connect receiver: the protocol TIDAL's own tidal_connect_application speaks to the phone,
+// as worked out by Brskt for Lunar's own implementation (https://github.com/Brskt/TidaLuna/tree/lunar-cef, src/connect).
+// Written anew from it, the protocol is the same
 // a TLS WebSocket with JSON messages. The phone only trusts TIDAL's CA, so the server needs TIDAL's desktop certificate and its key.
 // Playback itself is the renderer's (TIDAL's player), the receiver tells it what to load and play and hears back what it does.
 

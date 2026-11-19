@@ -1,14 +1,13 @@
-import { LunaUnload, unloadSet } from "@luna/core";
+import { LunaUnload, Tracer, unloadSet } from "@luna/core";
 import { ipcRenderer, MediaItem, PlayState, redux } from "@luna/lib";
-import { startOwnReceiver } from "./receiver";
-import { send, setup } from "./remoteService.native";
+import { send } from "./remoteService.native";
 
 export * from "./remoteService.native";
 
 export const unloads = new Set<LunaUnload>();
 
-// The own TIDAL Connect receiver when TIDAL's certificate and key are in place, otherwise TIDAL's (original.asar and its native process)
-if (!(await startOwnReceiver(unloads))) await setup();
+const { trace } = Tracer("[DesktopConnect]");
+trace.msg.warn("DesktopConnect is deprecated, please move to the new DesktopConnectNative plugin (TIDAL Connect without TIDAL's own receiver, also on Linux)");
 
 // #region From remote
 ipcRenderer.on(unloads, "remote.desktop.notify.media.changed", async ({ mediaId }) => {

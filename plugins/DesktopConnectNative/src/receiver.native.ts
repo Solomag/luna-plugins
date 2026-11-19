@@ -10,12 +10,12 @@ import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect
 import tidalCert from "file://./connect/tidal_server_cert.pem";
 
 type Running = { receiver: ConnectReceiver; service: CiaoService };
-declare const luna: { __desktopConnectReceiver?: Running };
+declare const luna: { __desktopConnectNativeReceiver?: Running };
 
-const receiverChannel = "desktopConnect.receiver";
+const receiverChannel = "desktopConnectNative.receiver";
 
 // A certificate and key in this folder replace the built-in ones (development, tests)
-export const keyFolder = () => path.join(app.getPath("userData"), "DesktopConnect");
+export const keyFolder = () => path.join(app.getPath("userData"), "DesktopConnectNative");
 const certFile = "tidal_server_cert.pem";
 const keyFile = "tidal_server_key.pem";
 
@@ -29,28 +29,28 @@ const toPlayer = (command: PlayerCommand) => {
 		if (contents.getURL().startsWith("https://desktop.tidal.com/")) contents.send(receiverChannel, command);
 	}
 };
-const log = (...args: unknown[]) => console.log("[DesktopConnect.receiver]", ...args);
+const log = (...args: unknown[]) => console.log("[DesktopConnectNative]", ...args);
 
 // Not TIDAL's own device id (its receiver may be advertised too), stable so the phone remembers the device
 const deviceId = () => createHash("md5").update(`TidaLuna:${hostname()}`).digest("hex");
 
 // The certificate and key from the key folder, otherwise TIDAL's certificate with the key the plugin was built with
-const loadKeys = async (builtInKey: string) => {
+const loadKeys = async (builtInKeyBase64: string) => {
 	const folder = keyFolder();
 	const [cert, key] = await Promise.all([readFile(path.join(folder, certFile)), readFile(path.join(folder, keyFile))]).catch(() => []);
 	if (cert !== undefined && key !== undefined) {
 		log(`Using ${certFile} and ${keyFile} from ${folder}`);
 		return { cert, key };
 	}
-	if (builtInKey !== "") return { cert: tidalCert, key: builtInKey };
+	if (builtInKeyBase64 !== "") return { cert: tidalCert, key: Buffer.from(builtInKeyBase64, "base64") };
 	log(`Built without TIDAL's server key and no ${certFile} and ${keyFile} in ${folder}, the own receiver is off`);
 	return undefined;
 };
 
 // Starts the own receiver, undefined without a key
-export const startReceiver = async (builtInKey: string): Promise<{ port: number } | undefined> => {
-	if (running.__desktopConnectReceiver) return { port: running.__desktopConnectReceiver.receiver.port };
-	const keys = await loadKeys(builtInKey);
+export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: number } | undefined> => {
+	if (running.__desktopConnectNativeReceiver) return { port: running.__desktopConnectNativeReceiver.receiver.port };
+	const keys = await loadKeys(builtInKeyBase64);
 	if (keys === undefined) return undefined;
 	const { cert, key } = keys;
 	// TIDAL's own receiver may use 9000, any port works as the phone takes it from the mDNS record
@@ -73,18 +73,18 @@ export const startReceiver = async (builtInKey: string): Promise<{ port: number 
 		},
 	});
 	await service.advertise();
-	running.__desktopConnectReceiver = { receiver, service };
+	running.__desktopConnectNativeReceiver = { receiver, service };
 	log("Listening on port", receiver.port);
 	return { port: receiver.port };
 };
 
 export const stopReceiver = async () => {
-	const current = running.__desktopConnectReceiver;
+	const current = running.__desktopConnectNativeReceiver;
 	if (current === undefined) return;
-	running.__desktopConnectReceiver = undefined;
+	running.__desktopConnectNativeReceiver = undefined;
 	await current.service.end().catch(log);
 	await current.service.destroy().catch(log);
 	await current.receiver.stop();
 };
 
-export const playerEvent = (event: PlayerEvent) => running.__desktopConnectReceiver?.receiver.onPlayerEvent(event);
+export const playerEvent = (event: PlayerEvent) => running.__desktopConnectNativeReceiver?.receiver.onPlayerEvent(event);

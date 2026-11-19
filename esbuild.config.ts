@@ -5,8 +5,10 @@ import { listen, pluginBuildOptions } from "luna/build";
 
 // luna/buildPlugins, with the build-time values plugins need
 
-// TIDAL's desktop server key for DesktopConnect's TIDAL Connect receiver, from the CI secret. Empty without it
-const define = { __TIDAL_SERVER_KEY_PEM__: JSON.stringify(process.env.TIDAL_SERVER_KEY_PEM ?? "") };
+// TIDAL's desktop server key for DesktopConnectNative's TIDAL Connect receiver, from the CI secret (the PEM text).
+// Baked into the output base64 encoded, so it is not there as plain text. Empty without it
+const serverKey = process.env.TIDAL_SERVER_KEY_PEM?.trim() ?? "";
+const define = { __TIDAL_SERVER_KEY_BASE64__: JSON.stringify(Buffer.from(serverKey).toString("base64")) };
 
 const pluginFolders = await readdir(join(process.cwd(), "./plugins"));
 const buildConfigs = await Promise.all(pluginFolders.map((name) => pluginBuildOptions(`./plugins/${name}`, { define })));
