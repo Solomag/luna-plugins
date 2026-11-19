@@ -76,6 +76,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	// Seconds into the phone's media, as reported to the phone
 	let positionS = 0;
 	const progress = (seconds: number) => {
+		if (!Number.isFinite(seconds)) return;
 		// Not the phone's media playing (it was not loaded): the phone's position stays for a play to load it at
 		if (loadFailed) return;
 		positionS = seconds;
@@ -159,6 +160,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			return;
 		}
 		if (unstarted) phoneSeek = time;
+		// Still starting, TIDAL may reset it to the beginning: this seek replaces the one waiting
+		else if (stopPendingSeek !== undefined) seekWhenPlaying(time);
 		positionS = time;
 		PlayState.seek(time);
 	};
@@ -240,6 +243,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 
 	// Only one seek waits, a newer one or a new load replaces it
 	let stopPendingSeek: (() => void) | undefined;
+	// The position a starting track must not go back before
+	let trackSeek: number | undefined;
 	const seekWhenPlaying = (time: number) => {
 		stopPendingSeek?.();
 		const waitUnloads = new Set<LunaUnload>();
@@ -254,12 +259,28 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			document.addEventListener("playing", onPlaying, true);
 			waitUnloads.add(() => document.removeEventListener("playing", onPlaying, true));
 		} else {
-			// A track TIDAL loads again on play starts from the beginning, seek again if its first position is not the phone's
+			// A track TIDAL loads again on play starts from the beginning (sometimes more than once),
+			// so while it starts seek again whenever it is back before the phone's position
+			trackSeek = time;
+			let seekedAt = 0;
+			let reached = false;
 			ipcRenderer.on(waitUnloads, "client.playback.playersignal", ({ time: position }: { time?: number }) => {
-				if (typeof position !== "number") return;
-				stop();
-				if (Math.abs(position - time) > 2) PlayState.seek(time);
+				// The position is NaN until the track really started.
+				// Far past it is not where it plays from (a late one of the previous track), a newer seek replaces or cancels this
+				if (trackSeek === undefined || typeof position !== "number" || !Number.isFinite(position) || position > trackSeek + 5) return;
+				if (position >= trackSeek - 2) {
+					reached = true;
+					trackSeek = Math.max(trackSeek, position);
+				} else if (Date.now() - seekedAt > 1000) {
+					seekedAt = Date.now();
+					PlayState.seek(trackSeek);
+				}
 			});
+			// Switching again after it played from there is the next play of it (repeat one) or another item, not a reset
+			redux.intercept("playbackControls/MEDIA_PRODUCT_TRANSITION", waitUnloads, () => {
+				if (reached) stop();
+			});
+			waitUnloads.add(() => (trackSeek = undefined));
 		}
 		const timeout = window.setTimeout(() => stop(), loadTimeoutMs);
 		const stop = () => {
@@ -321,7 +342,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		// Not every player signal has a time
 		ipcRenderer.on(sessionUnloads, "client.playback.playersignal", ({ time }: { time?: number }) => {
 			// Not the start TIDAL loads it at before the phone's seek is applied
-			if (typeof time === "number" && stopPendingSeek === undefined) progress(time);
+			if (typeof time === "number" && Number.isFinite(time) && (trackSeek === undefined || time >= trackSeek - 2)) progress(time);
 		});
 		// TIDAL sends no player signal for videos, their progress comes from the video element (media events don't bubble)
 		redux.intercept("playbackControls/MEDIA_PRODUCT_TRANSITION", sessionUnloads, ({ mediaProduct }) => {
@@ -354,7 +375,11 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			playerEvent({ type: "next" });
 			return true;
 		});
+		// A seek on the desktop (also back/forward and previous, which restarts the track) is newer than the phone's
+		for (const action of ["playbackControls/SEEK", "playbackControls/SEEK_BACKWARDS", "playbackControls/SEEK_FORWARDS"] as const)
+			redux.intercept(action, sessionUnloads, () => stopPendingSeek?.());
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
+			stopPendingSeek?.();
 			// Like TIDAL's own button: a track a few seconds in starts again
 			if (ended === undefined && !loadFailed && positionS > restartAfterS) PlayState.seek(0);
 			else playerEvent({ type: "previous" });
