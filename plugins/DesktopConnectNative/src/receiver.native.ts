@@ -9,7 +9,7 @@ import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect
 // TIDAL's desktop server certificate, public. The phone only trusts it (signed by TIDAL's CA)
 import tidalCert from "file://./connect/tidal_server_cert.pem";
 
-type Running = { receiver: ConnectReceiver; service: CiaoService };
+type Running = { receiver: ConnectReceiver; service: CiaoService; watchAddresses?: NodeJS.Timeout };
 declare const luna: { __desktopConnectNativeReceiver?: Running };
 
 const receiverChannel = "desktopConnectNative.receiver";
@@ -55,21 +55,23 @@ const lanAddresses = () =>
 		.filter((info) => info !== undefined && info.family === "IPv4" && !info.internal)
 		.map((info) => info!.address);
 
+// A new network (Wi-Fi, VPN, another address) is listened on within this time
+const addressCheckMs = 10_000;
+
 // TIDAL starts its own receiver (tidal_connect_application) with every window, it holds port 9000 on all addresses.
-// Windows still lets the port be taken on one address, and the phone's connections to that address come here
+// Windows still lets the port be taken on one address, and the phone's connections to that address come here.
+// The addresses change with the network, they are checked again every few seconds
 const listen = async (cert: string | Buffer, key: string | Buffer) => {
 	const options = { cert, key, port: connectPort, toPlayer, log };
 	try {
-		return await ConnectReceiver.start(options);
+		return { receiver: await ConnectReceiver.start(options) };
 	} catch (err) {
 		log(`Port ${connectPort} is taken (TIDAL's own receiver), listening on the network addresses`, (err as NodeJS.ErrnoException).code ?? err);
 	}
-	try {
-		return await ConnectReceiver.start({ ...options, hosts: lanAddresses() });
-	} catch (err) {
-		log(`Port ${connectPort} is taken on the network addresses too, phones will not find the receiver`, (err as NodeJS.ErrnoException).code ?? err);
-		return ConnectReceiver.start({ ...options, port: 0 });
-	}
+	const receiver = await ConnectReceiver.start({ ...options, hosts: lanAddresses() });
+	if (!receiver.listening) log(`Cannot listen on port ${connectPort} on any network address yet, phones will not find the receiver`);
+	const watchAddresses = setInterval(() => receiver.setHosts(lanAddresses()).catch(log), addressCheckMs);
+	return { receiver, watchAddresses };
 };
 
 // Starts the own receiver, undefined without a key
@@ -78,7 +80,7 @@ export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: n
 	const keys = await loadKeys(builtInKeyBase64);
 	if (keys === undefined) return undefined;
 	const { cert, key } = keys;
-	const receiver = await listen(cert, key);
+	const { receiver, watchAddresses } = await listen(cert, key);
 	const id = deviceId();
 	const service = getResponder().createService({
 		disabledIpv6: true,
@@ -94,7 +96,7 @@ export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: n
 		},
 	});
 	await service.advertise();
-	running.__desktopConnectNativeReceiver = { receiver, service };
+	running.__desktopConnectNativeReceiver = { receiver, service, watchAddresses };
 	log("Listening on port", receiver.port);
 	return { port: receiver.port };
 };
@@ -103,6 +105,7 @@ export const stopReceiver = async () => {
 	const current = running.__desktopConnectNativeReceiver;
 	if (current === undefined) return;
 	running.__desktopConnectNativeReceiver = undefined;
+	clearInterval(current.watchAddresses);
 	await current.service.end().catch(log);
 	await current.service.destroy().catch(log);
 	await current.receiver.stop();

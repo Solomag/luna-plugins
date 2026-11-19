@@ -65,7 +65,7 @@ export type ReceiverOptions = {
 	key: string | Buffer;
 	// The phone connects to port 9000 whatever the mDNS record says, 0 picks a free port (tests)
 	port: number;
-	// Listens on these addresses only, all of them when not given
+	// Listens on these addresses only (setHosts follows network changes), on all of them when not given
 	hosts?: string[];
 	toPlayer: (command: PlayerCommand) => void;
 	log?: (...args: unknown[]) => void;
@@ -94,7 +94,10 @@ const repeatModeOf = (mode: unknown): RepeatMode => (mode === "ONE" || mode === 
 export class ConnectReceiver {
 	// Not listening itself, the TCP listeners hand it their connections
 	private readonly server: Server;
-	private readonly listeners: TcpServer[] = [];
+	// By address, "" for all addresses
+	private readonly listeners = new Map<string, TcpServer>();
+	// Addresses it could not listen on, logged once
+	private readonly failedHosts = new Set<string>();
 	private readonly wss: WebSocketServer;
 	private readonly sockets = new Map<WebSocket, { alive: number }>();
 	private readonly pingTimer: NodeJS.Timeout;
@@ -138,47 +141,86 @@ export class ConnectReceiver {
 		this.pingTimer = setInterval(() => this.pingAll(), pingIntervalMs);
 	}
 
-	// Rejects when it can listen on none of the hosts
+	// Without hosts it rejects when the port is taken, with hosts it starts on the ones it can listen on (maybe none)
 	static async start(options: ReceiverOptions) {
 		const receiver = new ConnectReceiver(options);
-		const hosts = options.hosts ?? [undefined];
-		const errors: unknown[] = [];
-		for (const host of hosts) {
-			await receiver.listen(options.port, host).catch((err) => {
-				receiver.log("Cannot listen on", host ?? "all addresses", "port", options.port, err.code ?? err);
-				errors.push(err);
-			});
+		if (options.hosts !== undefined) {
+			await receiver.setHosts(options.hosts);
+			return receiver;
 		}
-		if (receiver.listeners.length === 0) {
+		await receiver.listen("").catch((err) => {
 			clearInterval(receiver.pingTimer);
-			throw errors[0];
-		}
+			throw err;
+		});
 		return receiver;
 	}
 
-	private listen(port: number, host: string | undefined) {
+	// Listens on the addresses the computer has now: new ones are added, gone ones closed
+	setHosts(hosts: string[]) {
+		// One change at a time, a second listen on the same address would fail
+		const run = this.hostsChange.then(() => this.applyHosts(hosts));
+		this.hostsChange = run;
+		return run;
+	}
+	private hostsChange: Promise<void> = Promise.resolve();
+	private stopped = false;
+	private async applyHosts(hosts: string[]) {
+		if (this.stopped) return;
+		for (const [host, listener] of this.listeners) {
+			if (hosts.includes(host)) continue;
+			this.listeners.delete(host);
+			listener.close();
+			this.log("Stopped listening on", host);
+		}
+		for (const host of hosts) {
+			if (this.stopped) return;
+			if (this.listeners.has(host)) continue;
+			await this.listen(host).then(
+				() => {
+					this.failedHosts.delete(host);
+					this.log("Listening on", host, "port", this.port);
+				},
+				(err) => {
+					if (this.failedHosts.has(host)) return;
+					this.failedHosts.add(host);
+					this.log("Cannot listen on", host, "port", this.options.port, err.code ?? err);
+				},
+			);
+		}
+	}
+
+	get listening() {
+		return this.listeners.size !== 0;
+	}
+
+	private listen(host: string) {
 		const listener = createTcpServer((socket) => this.server.emit("connection", socket));
 		return new Promise<void>((resolve, reject) => {
 			listener.once("error", reject);
-			listener.listen(port, host, () => {
+			listener.listen(this.options.port, host === "" ? undefined : host, () => {
 				listener.off("error", reject);
 				listener.on("error", (err) => this.log("listener error", err));
-				this.listeners.push(listener);
+				this.listeners.set(host, listener);
 				resolve();
 			});
 		});
 	}
 
 	get port() {
-		return (this.listeners[0].address() as AddressInfo).port;
+		const listener = this.listeners.values().next().value;
+		return listener === undefined ? this.options.port : (listener.address() as AddressInfo).port;
 	}
 
 	async stop() {
+		this.stopped = true;
 		clearInterval(this.pingTimer);
 		this.endSession(false);
 		for (const socket of this.sockets.keys()) socket.terminate();
 		this.wss.close();
-		await Promise.all(this.listeners.map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))));
+		await this.hostsChange;
+		const listeners = [...this.listeners.values()];
+		this.listeners.clear();
+		await Promise.all(listeners.map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))));
 	}
 
 	// #region Sockets
