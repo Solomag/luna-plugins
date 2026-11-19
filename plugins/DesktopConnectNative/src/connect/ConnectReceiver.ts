@@ -30,7 +30,8 @@ export type PlayerEvent =
 	| { type: "state"; state: PlayerState }
 	| { type: "progress"; positionMs: number }
 	| { type: "ended" }
-	| { type: "error"; message?: string }
+	// unavailable: TIDAL does not have the media (not a timeout or a failed request), the queue goes on past it
+	| { type: "error"; message?: string; unavailable?: boolean }
 	// The desktop user pressed next or previous
 	| { type: "next" }
 	| { type: "previous" };
@@ -141,6 +142,8 @@ export class ConnectReceiver {
 	// Set at the end of the queue: TIDAL still reports the stopped track (paused), the phone must see the receiver idle
 	private finished = false;
 	private failedInARow = 0;
+	// Whether the media was loaded to play, a media skipped after it starts the same way
+	private autoplay = true;
 
 	// Commands and player events are handled one after another, a queue request must not let a later command overtake it
 	private pending: Promise<unknown> = Promise.resolve();
@@ -436,8 +439,11 @@ export class ConnectReceiver {
 		this.send(socket, { command: "notifySessionResumed", sessionId: session.id });
 		if (session.suspended) {
 			session.suspended = false;
-			if (this.media !== undefined)
+			if (this.media !== undefined) {
+				// What the player does now is not known, it may load the phone's media again (it tells once it knows)
+				if (!this.finished) this.playerState = "BUFFERING";
 				this.options.toPlayer({ type: "attach", mediaId: this.media.mediaId, mediaType: this.media.mediaType, positionMs: this.positionMs });
+			}
 		}
 		// Bring the phone up to date
 		if (this.queueInfo !== undefined) this.send(socket, { command: "notifyQueueChanged", queueInfo: this.queueInfo });
@@ -498,12 +504,19 @@ export class ConnectReceiver {
 	}
 
 	// The part of the cloud queue around an item. False when the queue server failed (the window stays as it was)
-	private async loadWindow(options: { itemId?: string; mediaId?: string; sizes?: WindowSizes; quiet?: boolean } = {}): Promise<boolean> {
-		const { itemId, mediaId, sizes, quiet = false } = options;
-		const window = await this.requestWindow(itemId, sizes, quiet);
+	private async loadWindow(
+		options: { itemId?: string; mediaId?: string; sizes?: WindowSizes; quiet?: boolean; timeoutMs?: number } = {},
+	): Promise<boolean> {
+		const { itemId, mediaId, sizes, quiet = false, timeoutMs } = options;
+		const window = await this.requestWindow(itemId, sizes, quiet, timeoutMs);
 		if (window === undefined) return false;
 		const items = this.windowItems(window);
-		if (items === undefined) return true;
+		if (items === undefined) {
+			// The phone emptied the queue (the server says the window is all of it): nothing comes after the media playing.
+			// Otherwise the window stays, an empty one around an item says nothing about the queue
+			if (window.includes_head === true && window.includes_tail === true) this.clearItems();
+			return true;
+		}
 		const currentId = window.itemId ?? itemId ?? this.media?.itemId;
 		// The current item and its neighbours in the old window, it may be gone from the new one
 		const listed = currentId !== undefined && this.items.some((item) => this.itemIdOf(item) === currentId);
@@ -524,7 +537,7 @@ export class ConnectReceiver {
 				this.index = this.removed = undefined;
 			} else {
 				// The window is elsewhere (the server did not find the removed item), ask for the one around its neighbour
-				const around = await this.requestWindow(neighbourId, sizes, quiet);
+				const around = await this.requestWindow(neighbourId, sizes, quiet, timeoutMs);
 				const aroundItems = around && this.windowItems(around);
 				if (around === undefined || aroundItems === undefined) {
 					this.restoreWindow(saved);
@@ -539,14 +552,19 @@ export class ConnectReceiver {
 	}
 
 	// The queue server's window, undefined when it failed (the phone is told unless quiet)
-	private async requestWindow(itemId: string | undefined, sizes: WindowSizes | undefined, quiet: boolean): Promise<Json | undefined> {
+	private async requestWindow(
+		itemId: string | undefined,
+		sizes: WindowSizes | undefined,
+		quiet: boolean,
+		timeoutMs?: number,
+	): Promise<Json | undefined> {
 		if (this.queueInfo === undefined || this.queueServer === undefined) return undefined;
 		const { queueId, maxBeforeSize, maxAfterSize } = this.queueInfo;
 		const { before, after } = sizes ?? { before: maxBeforeSize, after: maxAfterSize };
 		let url = `${this.queueServer.serverUrl}/${queueId}/window?beforesize=${before}&aftersize=${after}&onlyactives=true`;
 		if (itemId !== undefined) url += `&itemid=${encodeURIComponent(itemId)}`;
 		try {
-			return await this.queueRequest("GET", url);
+			return await this.queueRequest("GET", url, undefined, timeoutMs);
 		} catch (err) {
 			this.log("queue window failed", err);
 			if (!quiet) this.queueServerError(err);
@@ -621,7 +639,8 @@ export class ConnectReceiver {
 			}
 			next = 0;
 		}
-		this.playItem(next);
+		// A skipped media's next one starts like it, paused when it was loaded paused
+		this.playItem(next, !failed || this.autoplay);
 		// Keep the window centred, the next items must be known before the track ends (not past the queue's own ends)
 		if ((next >= this.items.length - 2 && !this.includesTail) || (next <= 1 && !this.includesHead))
 			await this.loadWindow({ itemId: this.itemIdOf(this.items[next]) });
@@ -648,6 +667,12 @@ export class ConnectReceiver {
 			const edge = edgeId();
 			let loaded = false;
 			while (!loaded) {
+				const remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) {
+					this.log("queue not walked to its", end, "in time");
+					this.restoreWindow(saved);
+					return "unreached";
+				}
 				// The last try is the phone's own window, the one the server is known to send
 				const sizes =
 					size === phoneSize
@@ -656,7 +681,7 @@ export class ConnectReceiver {
 							? { before: size, after: 0 }
 							: { before: 0, after: size };
 				// Only the phone's size is reported to the phone when it fails
-				loaded = await this.loadWindow({ itemId: edge, sizes, quiet: size !== phoneSize });
+				loaded = await this.loadWindow({ itemId: edge, sizes, quiet: size !== phoneSize, timeoutMs: Math.min(remainingMs, httpTimeoutMs) });
 				if (loaded || size === phoneSize) break;
 				size = Math.max(Math.floor(size / 2), phoneSize);
 			}
@@ -674,12 +699,12 @@ export class ConnectReceiver {
 		return "moved";
 	}
 
-	private playItem(index: number) {
+	private playItem(index: number, autoplay = true) {
 		const item = this.items[index];
 		if (item === undefined) return;
 		this.index = index;
 		this.removed = undefined;
-		this.setMedia(this.mediaInfoOf(item));
+		this.setMedia(this.mediaInfoOf(item), autoplay);
 	}
 
 	private currentItemId() {
@@ -729,7 +754,7 @@ export class ConnectReceiver {
 		return params ? `Bearer ${params.accessToken}` : undefined;
 	}
 
-	private async queueRequest(method: "GET" | "POST" | "PUT", url: string, body?: Json, retried = false): Promise<Json> {
+	private async queueRequest(method: "GET" | "POST" | "PUT", url: string, body?: Json, timeoutMs = httpTimeoutMs, retried = false): Promise<Json> {
 		const server = this.queueServer;
 		if (server === undefined) throw new Error("No queue server");
 		if (!this.isTrustedUrl(url)) throw new Error(`Untrusted queue server ${url}`);
@@ -741,9 +766,9 @@ export class ConnectReceiver {
 			method,
 			headers,
 			body: body === undefined ? undefined : JSON.stringify(body),
-			signal: AbortSignal.timeout(httpTimeoutMs),
+			signal: AbortSignal.timeout(timeoutMs),
 		});
-		if (res.status === 401 && !retried && (await this.refreshToken())) return this.queueRequest(method, url, body, true);
+		if (res.status === 401 && !retried && (await this.refreshToken())) return this.queueRequest(method, url, body, timeoutMs, true);
 		if (!res.ok) throw Object.assign(new Error(`Queue server HTTP ${res.status}`), { status: res.status });
 		const text = await res.text();
 		return text ? JSON.parse(text) : {};
@@ -804,6 +829,7 @@ export class ConnectReceiver {
 	private setMedia(media: MediaInfo, autoplay = true, position?: unknown) {
 		const positionMs = typeof position === "number" && Number.isFinite(position) && position > 0 ? position : 0;
 		this.media = media;
+		this.autoplay = autoplay;
 		this.positionMs = positionMs;
 		this.finished = false;
 		this.log("media", media.mediaId, media.itemId);
@@ -871,7 +897,7 @@ export class ConnectReceiver {
 			case "error":
 				this.toSession({ command: "notifyPlaybackError", statusCode: event.message ?? "error" });
 				// The queue goes on past a media that cannot play (unavailable, removed from TIDAL), like TIDAL's own player
-				if (this.index !== undefined && this.failedInARow < maxFailedInARow) {
+				if (event.unavailable === true && this.index !== undefined && this.failedInARow < maxFailedInARow) {
 					this.failedInARow++;
 					return this.step(1, true, true);
 				}
