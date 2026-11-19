@@ -76,6 +76,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	// Seconds into the phone's media, as reported to the phone
 	let positionS = 0;
 	const progress = (seconds: number) => {
+		// Not the phone's media playing (it was not loaded): the phone's position stays for a play to load it at
+		if (loadFailed) return;
 		positionS = seconds;
 		playerEvent({ type: "progress", positionMs: seconds * 1000 });
 	};

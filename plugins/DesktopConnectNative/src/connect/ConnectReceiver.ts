@@ -488,8 +488,8 @@ export class ConnectReceiver {
 		this.setServers(message);
 		const queueInfo = message.queueInfo;
 		if (queueInfo) {
-			// A new queue: the old window's position must not stay when the new window fails
-			this.clearItems();
+			// Another queue: its window is not known until loaded
+			if (String(queueInfo.queueId ?? "") !== this.queueInfo?.queueId) this.clearItems();
 			this.queueInfo = {
 				queueId: String(queueInfo.queueId ?? ""),
 				repeatMode: repeatModeOf(queueInfo.repeatMode),
@@ -499,6 +499,13 @@ export class ConnectReceiver {
 			};
 		}
 		const current = message.currentMediaInfo ? this.mediaInfoOf(message.currentMediaInfo) : undefined;
+		if (current !== undefined) {
+			// The position is the new current item's (item ids are the queue's own), not the old one's when the new window fails
+			const index = this.items.findIndex((item) => this.itemIdOf(item) === current.itemId);
+			this.index = index !== -1 ? index : undefined;
+			this.removed = undefined;
+			this.failedInARow = 0;
+		}
 		// Start loading the media at once, the queue window only matters for what comes after it.
 		// A phone that was paused sends autoplay false, and where it was in the track
 		if (current !== undefined) this.setMedia(current, message.autoplay !== false, message.position);
