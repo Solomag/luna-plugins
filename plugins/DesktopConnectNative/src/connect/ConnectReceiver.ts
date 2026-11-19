@@ -363,14 +363,15 @@ export class ConnectReceiver {
 			case "setRepeatMode": {
 				const repeatMode = repeatModeOf(message.repeatMode);
 				this.queueInfo.repeatMode = repeatMode;
-				await this.postQueue("repeatmode", { repeatMode });
+				// The queue server's names are lower case and "off" for none
+				await this.putQueue("repeatmode", { repeat_mode: repeatMode === "NONE" ? "off" : repeatMode.toLowerCase() });
 				this.toSession({ command: "notifyQueueItemsChanged", queueInfo: this.queueInfo, reason: "REPEAT_MODE_CHANGED" });
 				return 0;
 			}
 			case "setShuffle": {
 				const shuffle = message.shuffle === true;
 				this.queueInfo.shuffled = shuffle;
-				await this.postQueue("shuffle", { shuffle });
+				await this.putQueue("shuffle", { shuffle });
 				// The server reorders the queue, the window around the current item changes
 				await this.loadWindow(this.currentItemId());
 				this.toSession({ command: "notifyQueueItemsChanged", queueInfo: this.queueInfo, reason: "SHUFFLE_CHANGED" });
@@ -561,7 +562,7 @@ export class ConnectReceiver {
 		return params ? `Bearer ${params.accessToken}` : undefined;
 	}
 
-	private async queueRequest(method: "GET" | "POST", url: string, body?: Json, retried = false): Promise<Json> {
+	private async queueRequest(method: "GET" | "POST" | "PUT", url: string, body?: Json, retried = false): Promise<Json> {
 		const server = this.queueServer;
 		if (server === undefined) throw new Error("No queue server");
 		if (!this.isTrustedUrl(url)) throw new Error(`Untrusted queue server ${url}`);
@@ -581,10 +582,11 @@ export class ConnectReceiver {
 		return text ? JSON.parse(text) : {};
 	}
 
-	private async postQueue(path: string, body: Json) {
-		if (this.queueServer === undefined) return;
+	// Changes the phone's queue on the queue server, the phone reads it back from there
+	private async putQueue(path: string, body: Json) {
+		if (this.queueServer === undefined || this.queueInfo === undefined) return;
 		try {
-			await this.queueRequest("POST", `${this.queueServer.serverUrl}/${path}`, body);
+			await this.queueRequest("PUT", `${this.queueServer.serverUrl}/${this.queueInfo.queueId}/${path}`, body);
 		} catch (err) {
 			this.log(`queue ${path} failed`, err);
 		}
