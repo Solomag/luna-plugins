@@ -124,7 +124,8 @@ export class ConnectReceiver {
 		this.log = options.log ?? (() => {});
 		this.isTrustedUrl = options.isTrustedUrl ?? isTidalUrl;
 		this.server = createServer({ cert: options.cert, key: options.key });
-		this.wss = new WebSocketServer({ server: this.server });
+		// The phone's messages are small JSON, ws would accept 100 MiB
+		this.wss = new WebSocketServer({ server: this.server, maxPayload: 1024 * 1024 });
 		// ws forwards the server's errors (port in use) and would throw them without a listener
 		this.wss.on("error", (err) => this.log("server error", err));
 		this.wss.on("connection", (socket) => this.onConnection(socket));
@@ -250,6 +251,8 @@ export class ConnectReceiver {
 				this.media = undefined;
 				toPlayer({ type: "stop" });
 				this.setPlayerState("IDLE");
+				// TIDAL reports the stopped media paused afterwards
+				this.finished = true;
 				return 0;
 			case "setVolume":
 				if (typeof message.level === "number") toPlayer({ type: "volume", level: message.level });
@@ -262,7 +265,7 @@ export class ConnectReceiver {
 				return 0;
 			case "loadMedia":
 			case "loadMediaInfo":
-				if (message.mediaInfo) this.setMedia(this.mediaInfoOf(message.mediaInfo));
+				if (message.mediaInfo) this.setMedia(this.mediaInfoOf(message.mediaInfo), message.autoplay !== false, message.position);
 				return 0;
 			case "updateServerInfo":
 				this.setServers(message);
@@ -384,8 +387,9 @@ export class ConnectReceiver {
 			};
 		}
 		const current = message.currentMediaInfo ? this.mediaInfoOf(message.currentMediaInfo) : undefined;
-		// Start loading the media at once, the queue window only matters for what comes after it
-		if (current !== undefined) this.setMedia(current);
+		// Start loading the media at once, the queue window only matters for what comes after it.
+		// A phone that was paused sends autoplay false, and where it was in the track
+		if (current !== undefined) this.setMedia(current, message.autoplay !== false, message.position);
 		await this.loadWindow(current?.itemId, current?.mediaId);
 		if (this.queueInfo !== undefined) this.toSession({ command: "notifyQueueChanged", queueInfo: this.queueInfo });
 	}
@@ -554,14 +558,16 @@ export class ConnectReceiver {
 	// #endregion
 
 	// #region Player
-	private setMedia(media: MediaInfo) {
+	private setMedia(media: MediaInfo, autoplay = true, position?: unknown) {
+		const positionMs = typeof position === "number" && Number.isFinite(position) && position > 0 ? position : 0;
 		this.media = media;
-		this.positionMs = 0;
+		this.positionMs = positionMs;
 		this.finished = false;
 		this.log("media", media.mediaId, media.itemId);
 		this.toSession(this.mediaChanged(media));
 		this.setPlayerState("BUFFERING");
-		this.options.toPlayer({ type: "load", mediaId: media.mediaId, mediaType: media.mediaType, autoplay: true });
+		this.options.toPlayer({ type: "load", mediaId: media.mediaId, mediaType: media.mediaType, autoplay });
+		if (positionMs !== 0) this.options.toPlayer({ type: "seek", positionMs });
 	}
 
 	// TIDAL's phone app parses every field with a fixed type: no nulls
