@@ -615,10 +615,14 @@ export class ConnectReceiver {
 	// Moves through the queue: by the phone's or desktop's next/previous (repeat one is skipped), when a track ended
 	// or when a media failed (failed: on to the next one, also with repeat one)
 	private async step(by: 1 | -1, ended: boolean, failed = false) {
-		// No window known (its request failed): load it around the current item first.
-		// When that fails the queue goes on, the phone was told about the error and can try again
+		// The queue server failed (the phone was told), the queue does not end: its next can try again.
+		// Nothing plays after an ended or failed media, the phone must not show it playing
+		const serverFailed = () => {
+			if (ended) this.setPlayerState("PAUSED");
+		};
+		// No window known (its request failed): load it around the current item first
 		if (this.index === undefined && this.queueInfo !== undefined && this.media?.itemId !== undefined) {
-			if (!(await this.loadWindow({ itemId: this.media.itemId, mediaId: this.media.mediaId }))) return;
+			if (!(await this.loadWindow({ itemId: this.media.itemId, mediaId: this.media.mediaId }))) return serverFailed();
 		}
 		if (this.index === undefined || this.queueInfo === undefined) {
 			// A single media, or one not in the queue: its end is the end
@@ -637,20 +641,18 @@ export class ConnectReceiver {
 		// After a removed current item index is already its neighbour on that side
 		const nextIndex = () => this.index! + (this.removed === (by === 1 ? "after" : "before") ? 0 : by);
 		let next = nextIndex();
-		// The window ends before the queue does (it was not moved in time), move it over the current item.
-		// When that fails the queue goes on, the phone was told about the error and can try again
+		// The window ends before the queue does (it was not moved in time), move it over the current item
 		if ((next < 0 && !this.includesHead) || (next >= this.items.length && !this.includesTail)) {
-			if (!(await this.loadWindow({ itemId: this.currentItemId() })) || this.index === undefined) return;
+			if (!(await this.loadWindow({ itemId: this.currentItemId() })) || this.index === undefined) return serverFailed();
 			next = nextIndex();
 		}
 		if (next < 0) {
 			const moved = repeatMode === "ALL" ? await this.moveWindowTo("tail") : "unreached";
-			// The queue server failed (the phone was told), not the queue's other end
-			if (moved === "failed") return;
+			if (moved === "failed") return serverFailed();
 			next = moved === "moved" ? this.items.length - 1 : 0;
 		} else if (next >= this.items.length) {
 			const moved = repeatMode === "ALL" ? await this.moveWindowTo("head") : "unreached";
-			if (moved === "failed") return;
+			if (moved === "failed") return serverFailed();
 			if (moved === "unreached") {
 				// The end of the queue
 				if (ended) {
