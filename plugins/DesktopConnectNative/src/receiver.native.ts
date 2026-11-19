@@ -1,4 +1,4 @@
-import { getResponder, type CiaoService } from "@homebridge/ciao";
+import { getResponder, type CiaoService, type Responder } from "@homebridge/ciao";
 import { createHash } from "crypto";
 import { app, webContents } from "electron";
 import { readFile } from "fs/promises";
@@ -9,7 +9,8 @@ import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect
 // TIDAL's desktop server certificate, public. The phone only trusts it (signed by TIDAL's CA)
 import tidalCert from "file://./connect/tidal_server_cert.pem";
 
-type Running = { receiver: ConnectReceiver; service: CiaoService; watchAddresses?: NodeJS.Timeout };
+// The mDNS responder is this module's own (luna bundles ciao into it, a reload gets a new one), it is shut down with the receiver
+type Running = { receiver: ConnectReceiver; responder: Responder; service?: CiaoService; watchAddresses?: NodeJS.Timeout };
 declare const luna: { __desktopConnectNativeReceiver?: Running; __desktopConnectNativeChange?: Promise<unknown> };
 
 const receiverChannel = "desktopConnectNative.receiver";
@@ -91,10 +92,24 @@ const start = async (builtInKeyBase64: string): Promise<{ port: number } | undef
 	if (keys === undefined) return undefined;
 	const { cert, key } = keys;
 	const { receiver, watchAddresses } = await listen(cert, key);
+	// Kept at once, so a failed advertise below still stops the receiver
+	const current: Running = { receiver, responder: getResponder(), watchAddresses };
+	running.__desktopConnectNativeReceiver = current;
+	try {
+		await advertise(current);
+	} catch (err) {
+		await stop();
+		throw err;
+	}
+	log("Listening on port", receiver.port);
+	return { port: receiver.port };
+};
+
+const advertise = async (current: Running) => {
 	const id = deviceId();
-	const service = getResponder().createService({
+	current.service = current.responder.createService({
 		disabledIpv6: true,
-		port: receiver.port,
+		port: current.receiver.port,
 		type: "tidalconnect",
 		name: `TidalConnect-${id.slice(0, 8)}`,
 		txt: {
@@ -105,10 +120,7 @@ const start = async (builtInKeyBase64: string): Promise<{ port: number } | undef
 			ve: "1",
 		},
 	});
-	await service.advertise();
-	running.__desktopConnectNativeReceiver = { receiver, service, watchAddresses };
-	log("Listening on port", receiver.port);
-	return { port: receiver.port };
+	await current.service.advertise();
 };
 
 export const stopReceiver = () => oneAtATime(stop);
@@ -117,8 +129,9 @@ const stop = async () => {
 	if (current === undefined) return;
 	running.__desktopConnectNativeReceiver = undefined;
 	clearInterval(current.watchAddresses);
-	await current.service.end().catch(log);
-	await current.service.destroy().catch(log);
+	await current.service?.end().catch(log);
+	await current.service?.destroy().catch(log);
+	await current.responder.shutdown().catch(log);
 	await current.receiver.stop();
 };
 

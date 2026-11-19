@@ -28,7 +28,7 @@ jobs:
       - name: Build
         run: pnpm run build
         env:
-          # TIDAL's desktop server key, built into DesktopConnect's TIDAL Connect receiver
+          # TIDAL's desktop server key, built into DesktopConnectNative's TIDAL Connect receiver
           TIDAL_SERVER_KEY_PEM: ${{ secrets.TIDAL_SERVER_KEY_PEM }}
 
       - name: Upload Build Artifacts

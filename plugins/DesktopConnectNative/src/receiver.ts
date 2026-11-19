@@ -80,6 +80,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	// The phone's media TIDAL's player ended: the player is left ended, a play loads it again (at a seek made meanwhile)
 	let current: { mediaId: string; mediaType: number } | undefined;
 	let ended: { mediaId: string; mediaType: number; seek?: number } | undefined;
+	// The desktop's repeat mode before the phone's first load, set while the phone controls the player
+	let desktopRepeatMode: redux.RepeatMode | undefined;
 
 	const run = async (command: PlayerCommand) => {
 		switch (command.type) {
@@ -174,6 +176,14 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		);
 		// Only the phone's item in the queue, otherwise TIDAL moves on to its own next item when the track ends (without ENDED).
 		// Repeat is the receiver's (its queue), the local one stays off
+		// The desktop's own repeat mode comes back when the phone lets go (sessionUnloads), read before the queue is cleared (that resets it)
+		if (desktopRepeatMode === undefined) {
+			const repeatMode = (desktopRepeatMode = PlayState.repeatMode);
+			sessionUnloads.add(() => {
+				desktopRepeatMode = undefined;
+				redux.actions["playQueue/SET_REPEAT_MODE"](repeatMode);
+			});
+		}
 		redux.actions["playQueue/CLEAR_QUEUE"]();
 		redux.actions["playQueue/SET_REPEAT_MODE"](redux.RepeatMode.Off);
 		redux.actions["playQueue/ADD_NEXT"]({ context: { type: "UNKNOWN" }, mediaItemIds: [mediaItem.tidalItem?.id ?? mediaItem.id] });

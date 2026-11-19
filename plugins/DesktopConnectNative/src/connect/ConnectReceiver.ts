@@ -77,7 +77,9 @@ const pingIntervalMs = 15_000;
 const pingTimeoutMs = 31_000;
 const progressIntervalMs = 1_000;
 const httpTimeoutMs = 30_000;
-// A queue longer than this many windows is not walked to its other end for repeat all
+// Repeat all walks the queue to its other end in windows this long (the server may send shorter ones),
+// a queue longer than this many windows is not walked
+const walkWindowSize = 100;
 const maxWindowMoves = 50;
 
 // The phone hands over its own tokens, they must only ever go to TIDAL's servers
@@ -333,7 +335,12 @@ export class ConnectReceiver {
 				return 0;
 			case "loadMedia":
 			case "loadMediaInfo":
-				if (message.mediaInfo) this.setMedia(this.mediaInfoOf(message.mediaInfo), message.autoplay !== false, message.position);
+				if (message.mediaInfo) {
+					// A single media, not from the queue loaded before: its end is the end
+					this.clearItems();
+					this.queueInfo = undefined;
+					this.setMedia(this.mediaInfoOf(message.mediaInfo), message.autoplay !== false, message.position);
+				}
 				return 0;
 			case "updateServerInfo":
 				this.setServers(message);
@@ -432,11 +439,15 @@ export class ConnectReceiver {
 	}
 
 	private clearQueue() {
-		this.queueServer = this.queueInfo = this.index = this.media = undefined;
-		this.items = [];
-		this.includesHead = this.includesTail = true;
+		this.queueServer = this.queueInfo = this.media = undefined;
+		this.clearItems();
 		this.playerState = "IDLE";
 		this.positionMs = 0;
+	}
+	private clearItems() {
+		this.items = [];
+		this.index = undefined;
+		this.includesHead = this.includesTail = true;
 	}
 	// #endregion
 
@@ -466,22 +477,24 @@ export class ConnectReceiver {
 		if (this.queueInfo !== undefined) this.toSession({ command: "notifyQueueChanged", queueInfo: this.queueInfo });
 	}
 
-	// The part of the cloud queue around an item
-	private async loadWindow(itemId?: string, mediaId?: string) {
-		if (this.queueInfo === undefined || this.queueServer === undefined) return;
+	// The part of the cloud queue around an item. False when the queue server failed
+	private async loadWindow(itemId?: string, mediaId?: string, sizes?: { before: number; after: number }, quiet = false) {
+		if (this.queueInfo === undefined || this.queueServer === undefined) return false;
 		const { queueId, maxBeforeSize, maxAfterSize } = this.queueInfo;
-		let url = `${this.queueServer.serverUrl}/${queueId}/window?beforesize=${maxBeforeSize}&aftersize=${maxAfterSize}&onlyactives=true`;
+		const { before, after } = sizes ?? { before: maxBeforeSize, after: maxAfterSize };
+		let url = `${this.queueServer.serverUrl}/${queueId}/window?beforesize=${before}&aftersize=${after}&onlyactives=true`;
 		if (itemId !== undefined) url += `&itemid=${encodeURIComponent(itemId)}`;
 		let window: Json;
 		try {
 			window = await this.queueRequest("GET", url);
 		} catch (err) {
 			this.log("queue window failed", err);
-			this.queueServerError(err);
-			return;
+			if (!quiet) this.queueServerError(err);
+			return false;
 		}
 		const items = window.items ?? window.mediaInfos;
-		if (Array.isArray(items) && items.length !== 0) {
+		const replaced = Array.isArray(items) && items.length !== 0;
+		if (replaced) {
 			this.items = items;
 			this.includesHead = window.includes_head !== false;
 			this.includesTail = window.includes_tail !== false;
@@ -490,8 +503,11 @@ export class ConnectReceiver {
 		let index = this.items.findIndex((item) => this.itemIdOf(item) === currentId);
 		const currentMediaId = mediaId ?? this.media?.mediaId;
 		if (index === -1 && currentMediaId !== undefined) index = this.items.findIndex((item) => this.mediaIdOf(item) === currentMediaId);
+		// Not in the new window (removed from the queue): no position, the old one would point at another item
 		if (index !== -1) this.index = index;
+		else if (replaced) this.index = undefined;
 		this.log("queue window", this.items.length, "items, current", this.index);
+		return true;
 	}
 
 	// Moves through the queue: by the phone's or desktop's next/previous (repeat one is skipped) or when a track ended
@@ -500,10 +516,11 @@ export class ConnectReceiver {
 		const { repeatMode } = this.queueInfo;
 		if (ended && repeatMode === "ONE") return this.playItem(this.index);
 		let next = this.index + by;
-		// The window ends before the queue does (it was not moved in time), move it over the current item
+		// The window ends before the queue does (it was not moved in time), move it over the current item.
+		// When that fails the queue goes on, the phone was told about the error and can try again
 		if ((next < 0 && !this.includesHead) || (next >= this.items.length && !this.includesTail)) {
-			await this.loadWindow(this.currentItemId());
-			next = (this.index ?? 0) + by;
+			if (!(await this.loadWindow(this.currentItemId())) || this.index === undefined) return;
+			next = this.index + by;
 		}
 		if (next < 0) {
 			if (repeatMode === "ALL") {
@@ -523,17 +540,36 @@ export class ConnectReceiver {
 			next = 0;
 		}
 		this.playItem(next);
-		// Keep the window centred, the next items must be known before the track ends
-		if (next >= this.items.length - 2 || next <= 1) await this.loadWindow(this.itemIdOf(this.items[next]));
+		// Keep the window centred, the next items must be known before the track ends (not past the queue's own ends)
+		if ((next >= this.items.length - 2 && !this.includesTail) || (next <= 1 && !this.includesHead))
+			await this.loadWindow(this.itemIdOf(this.items[next]));
 	}
 
-	// Repeat all goes round to the other end of the queue, the window may not reach it
+	// Repeat all goes round to the other end of the queue, the window may not reach it.
+	// It moves in long windows (fewer requests while the phone's commands wait), shorter ones down to the phone's size when the server refuses them
 	private async moveWindowTo(end: "head" | "tail") {
+		const { maxBeforeSize, maxAfterSize } = this.queueInfo!;
+		const phoneSize = end === "head" ? maxBeforeSize : maxAfterSize;
+		let size = Math.max(walkWindowSize, phoneSize);
 		for (let moves = 0; moves < maxWindowMoves && !(end === "head" ? this.includesHead : this.includesTail); moves++) {
+			const edge = this.itemIdOf(end === "head" ? this.items[0] : this.items[this.items.length - 1]);
 			const items = this.items;
-			await this.loadWindow(this.itemIdOf(end === "head" ? items[0] : items[items.length - 1]));
+			let loaded = false;
+			while (!loaded) {
+				// The last try is the phone's own window, the one the server is known to send
+				const sizes =
+					size === phoneSize
+						? { before: maxBeforeSize, after: maxAfterSize }
+						: end === "head"
+							? { before: size, after: 0 }
+							: { before: 0, after: size };
+				// Only the phone's size is reported to the phone when it fails
+				loaded = await this.loadWindow(edge, undefined, sizes, size !== phoneSize);
+				if (loaded || size === phoneSize) break;
+				size = Math.max(Math.floor(size / 2), phoneSize);
+			}
 			// The queue server failed, the window stays
-			if (this.items === items) return;
+			if (!loaded || this.items === items) return;
 		}
 	}
 
