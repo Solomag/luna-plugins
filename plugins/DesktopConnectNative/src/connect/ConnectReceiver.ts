@@ -1,5 +1,5 @@
 import { createServer, type Server } from "https";
-import type { AddressInfo } from "net";
+import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer } from "net";
 import { randomUUID } from "crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 
@@ -63,8 +63,10 @@ type MediaInfo = {
 export type ReceiverOptions = {
 	cert: string | Buffer;
 	key: string | Buffer;
-	// 0 picks a free port, the phone finds it in the mDNS record
+	// The phone connects to port 9000 whatever the mDNS record says, 0 picks a free port (tests)
 	port: number;
+	// Listens on these addresses only, all of them when not given
+	hosts?: string[];
 	toPlayer: (command: PlayerCommand) => void;
 	log?: (...args: unknown[]) => void;
 	// Tests point the receiver at a local queue server
@@ -90,7 +92,9 @@ export const isTidalUrl = (url: string) => {
 const repeatModeOf = (mode: unknown): RepeatMode => (mode === "ONE" || mode === "ALL" ? mode : "NONE");
 
 export class ConnectReceiver {
+	// Not listening itself, the TCP listeners hand it their connections
 	private readonly server: Server;
+	private readonly listeners: TcpServer[] = [];
 	private readonly wss: WebSocketServer;
 	private readonly sockets = new Map<WebSocket, { alive: number }>();
 	private readonly pingTimer: NodeJS.Timeout;
@@ -134,23 +138,39 @@ export class ConnectReceiver {
 		this.pingTimer = setInterval(() => this.pingAll(), pingIntervalMs);
 	}
 
+	// Rejects when it can listen on none of the hosts
 	static async start(options: ReceiverOptions) {
 		const receiver = new ConnectReceiver(options);
-		await new Promise<void>((resolve, reject) => {
-			receiver.server.once("error", reject);
-			receiver.server.listen(options.port, () => {
-				receiver.server.off("error", reject);
-				resolve();
+		const hosts = options.hosts ?? [undefined];
+		const errors: unknown[] = [];
+		for (const host of hosts) {
+			await receiver.listen(options.port, host).catch((err) => {
+				receiver.log("Cannot listen on", host ?? "all addresses", "port", options.port, err.code ?? err);
+				errors.push(err);
 			});
-		}).catch((err) => {
+		}
+		if (receiver.listeners.length === 0) {
 			clearInterval(receiver.pingTimer);
-			throw err;
-		});
+			throw errors[0];
+		}
 		return receiver;
 	}
 
+	private listen(port: number, host: string | undefined) {
+		const listener = createTcpServer((socket) => this.server.emit("connection", socket));
+		return new Promise<void>((resolve, reject) => {
+			listener.once("error", reject);
+			listener.listen(port, host, () => {
+				listener.off("error", reject);
+				listener.on("error", (err) => this.log("listener error", err));
+				this.listeners.push(listener);
+				resolve();
+			});
+		});
+	}
+
 	get port() {
-		return (this.server.address() as AddressInfo).port;
+		return (this.listeners[0].address() as AddressInfo).port;
 	}
 
 	async stop() {
@@ -158,7 +178,7 @@ export class ConnectReceiver {
 		this.endSession(false);
 		for (const socket of this.sockets.keys()) socket.terminate();
 		this.wss.close();
-		await new Promise<void>((resolve) => this.server.close(() => resolve()));
+		await Promise.all(this.listeners.map((listener) => new Promise<void>((resolve) => listener.close(() => resolve()))));
 	}
 
 	// #region Sockets
@@ -467,15 +487,18 @@ export class ConnectReceiver {
 	}
 	private mediaInfoOf(item: Json): MediaInfo {
 		const display = item.display_info ?? item.displayInfo;
-		const metadata =
+		// The queue server's items carry their length as display_info.duration_ms, the phone's media infos as metadata.duration
+		const duration = display?.duration ?? display?.duration_ms ?? item.duration_ms;
+		let metadata =
 			item.metadata ??
 			(display && {
 				title: display.title,
 				albumTitle: display.album_title ?? display.albumTitle,
 				artists: display.artists,
-				duration: display.duration,
+				duration,
 				images: display.images,
 			});
+		if (metadata !== undefined && metadata.duration === undefined && typeof duration === "number") metadata = { ...metadata, duration };
 		const video = item.video === true || item.mediaType === 1;
 		return {
 			itemId: this.itemIdOf(item) ?? "",
@@ -580,8 +603,9 @@ export class ConnectReceiver {
 				itemId: media.itemId,
 				mediaId: media.mediaId,
 				mediaType: media.mediaType,
-				srcUrl: "",
-				streamType: media.streamType ?? "",
+				// An empty string fails the phone's check of the whole message (it then shows no duration and its seek bar sends 0),
+				// no source and no stream type are left out
+				...(media.streamType ? { streamType: media.streamType } : {}),
 				customData: "{}",
 				metadata: media.metadata ?? { title: "Unknown" },
 				policy: media.policy ?? { canNext: true, canPrevious: true },

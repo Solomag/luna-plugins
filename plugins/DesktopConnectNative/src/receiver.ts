@@ -129,7 +129,11 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			attach();
 			PlayState.seek(0);
 			if (autoplay) play();
-			else pause();
+			else {
+				pause();
+				// TIDAL was paused already and reports nothing, the phone waits in buffering
+				playerEvent({ type: "state", state: "PAUSED" });
+			}
 			return;
 		}
 		const mediaItem = await withTimeout(MediaItem.fromId(mediaId, mediaType === 1 ? "video" : "track"), loadTimeoutMs).catch((err) => {

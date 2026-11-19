@@ -2,7 +2,7 @@ import { getResponder, type CiaoService } from "@homebridge/ciao";
 import { createHash } from "crypto";
 import { app, webContents } from "electron";
 import { readFile } from "fs/promises";
-import { hostname } from "os";
+import { hostname, networkInterfaces } from "os";
 import path from "path";
 
 import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect/ConnectReceiver";
@@ -47,17 +47,38 @@ const loadKeys = async (builtInKeyBase64: string) => {
 	return undefined;
 };
 
+// The phone connects to port 9000 whatever port the mDNS record says (Lunar uses 9000 too)
+const connectPort = 9000;
+const lanAddresses = () =>
+	Object.values(networkInterfaces())
+		.flat()
+		.filter((info) => info !== undefined && info.family === "IPv4" && !info.internal)
+		.map((info) => info!.address);
+
+// TIDAL starts its own receiver (tidal_connect_application) with every window, it holds port 9000 on all addresses.
+// Windows still lets the port be taken on one address, and the phone's connections to that address come here
+const listen = async (cert: string | Buffer, key: string | Buffer) => {
+	const options = { cert, key, port: connectPort, toPlayer, log };
+	try {
+		return await ConnectReceiver.start(options);
+	} catch (err) {
+		log(`Port ${connectPort} is taken (TIDAL's own receiver), listening on the network addresses`, (err as NodeJS.ErrnoException).code ?? err);
+	}
+	try {
+		return await ConnectReceiver.start({ ...options, hosts: lanAddresses() });
+	} catch (err) {
+		log(`Port ${connectPort} is taken on the network addresses too, phones will not find the receiver`, (err as NodeJS.ErrnoException).code ?? err);
+		return ConnectReceiver.start({ ...options, port: 0 });
+	}
+};
+
 // Starts the own receiver, undefined without a key
 export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: number } | undefined> => {
 	if (running.__desktopConnectNativeReceiver) return { port: running.__desktopConnectNativeReceiver.receiver.port };
 	const keys = await loadKeys(builtInKeyBase64);
 	if (keys === undefined) return undefined;
 	const { cert, key } = keys;
-	// TIDAL's own receiver may use 9000, any port works as the phone takes it from the mDNS record
-	const receiver = await ConnectReceiver.start({ cert, key, port: 9000, toPlayer, log }).catch((err) => {
-		log("Port 9000 is taken, using a free one", err.code ?? err);
-		return ConnectReceiver.start({ cert, key, port: 0, toPlayer, log });
-	});
+	const receiver = await listen(cert, key);
 	const id = deviceId();
 	const service = getResponder().createService({
 		disabledIpv6: true,
