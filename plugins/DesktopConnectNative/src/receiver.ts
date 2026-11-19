@@ -13,6 +13,8 @@ declare const __TIDAL_SERVER_KEY_BASE64__: string;
 const receiverChannel = "desktopConnectNative.receiver";
 // Loading a video can take over 5s
 const loadTimeoutMs = 10000;
+// The desktop's previous starts the track again after this many seconds of it
+const restartAfterS = 3;
 
 // Resolves undefined after the timeout
 const withTimeout = <T>(promise: Promise<T>, timeoutMs: number) => {
@@ -69,6 +71,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	let loadFailed = false;
 	// The phone's media in TIDAL's queue, a load of the same media (repeat one) starts it again instead of reloading it
 	let loaded: { mediaId: string; uid: string } | undefined;
+	// The phone's element in TIDAL's queue, also after it ended: a resumed session finds out whether the desktop played something else meanwhile
+	let phoneUid: string | undefined;
 	// TIDAL ignores a seek on a video it has not started yet (it loads it again on play and starts from the beginning),
 	// and sometimes does the same for a track loaded right after a video, so the phone's seek is applied again once it plays
 	let unstarted = false;
@@ -105,7 +109,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 				pauseWhenPlaying = false;
 				return unloadSet(sessionUnloads);
 			case "attach":
-				return attach();
+				return resume(command.mediaId, command.mediaType, command.positionMs);
 		}
 	};
 
@@ -161,7 +165,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			return undefined;
 		});
 		loadFailed = mediaItem === undefined;
-		loaded = undefined;
+		loaded = phoneUid = undefined;
 		if (mediaItem === undefined) {
 			PlayState.pause();
 			playerEvent({ type: "error", message: `Media ${mediaId} not found` });
@@ -187,9 +191,18 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		loading = false;
 		const uid = currentElement()?.uid;
 		if (uid !== undefined) loaded = { mediaId, uid };
+		phoneUid = uid;
 		if (autoplay) play();
 		// Not started, tell the phone it is ready (TIDAL reported it while loading)
 		else playerEvent({ type: "state", state: "PAUSED" });
+	};
+
+	// A resumed session follows the phone again. When the desktop played something else meanwhile,
+	// the phone's media is loaded again (paused where it was), the desktop's track is not taken for it
+	const resume = async (mediaId: string, mediaType: number, positionMs: number) => {
+		if (phoneUid !== undefined && currentElement()?.uid === phoneUid) return attach();
+		await load(mediaId, mediaType, false);
+		if (positionMs > 0) seek(positionMs / 1000);
 	};
 
 	// Only one seek waits, a newer one or a new load replaces it
@@ -231,9 +244,10 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		if (sessionUnloads.size !== 0) return;
 		// Also after a resumed session (no load follows), TIDAL repeating the track by itself would skip the phone's queue
 		desktopRepeatMode = PlayState.repeatMode;
-		redux.intercept("playQueue/SET_REPEAT_MODE", sessionUnloads, (repeatMode) => {
-			// The desktop user's choice, for when the phone lets go
-			desktopRepeatMode = repeatMode;
+		redux.intercept("playQueue/SET_REPEAT_MODE", sessionUnloads, () => {
+			// The desktop user's choice, for when the phone lets go. TIDAL's button goes on from the mode it shows (off),
+			// so the kept one goes round here: off, all, one
+			desktopRepeatMode = ((desktopRepeatMode + 1) % 3) as redux.RepeatMode;
 			return true;
 		});
 		sessionUnloads.add(() => setRepeatMode(desktopRepeatMode));
@@ -308,7 +322,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			return true;
 		});
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
-			playerEvent({ type: "previous" });
+			// Like TIDAL's own button: a track a few seconds in starts again
+			if (ended === undefined && PlayState.currentTime > restartAfterS) PlayState.seek(0);
+			else playerEvent({ type: "previous" });
 			return true;
 		});
 	};
