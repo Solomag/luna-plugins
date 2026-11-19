@@ -1,4 +1,4 @@
-import { LunaUnload, Tracer, unloadSet } from "@luna/core";
+import { LunaPlugin, LunaUnload, Tracer, unloadSet } from "@luna/core";
 import { ipcRenderer, MediaItem, PlayState, redux } from "@luna/lib";
 import { send } from "./remoteService.native";
 
@@ -8,6 +8,12 @@ export const unloads = new Set<LunaUnload>();
 
 const { trace } = Tracer("[DesktopConnect]");
 trace.msg.warn("DesktopConnect is deprecated, please move to the new DesktopConnectNative plugin (TIDAL Connect without TIDAL's own receiver, also on Linux)");
+// Both would answer the phone (two devices), the one enabled last stays
+const native = LunaPlugin.getByName("DesktopConnectNative");
+if (native?.enabled) {
+	trace.msg.warn("Disabled DesktopConnectNative, both can't run at once");
+	native.disable().catch(trace.err.withContext("disable DesktopConnectNative"));
+}
 
 // #region From remote
 ipcRenderer.on(unloads, "remote.desktop.notify.media.changed", async ({ mediaId }) => {
