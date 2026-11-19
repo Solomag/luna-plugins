@@ -365,7 +365,8 @@ export class ConnectReceiver {
 				return 0;
 		}
 		// Queue commands
-		if (this.queueInfo === undefined || this.items.length === 0) {
+		// A refresh also when no window is known: the first one failed, or the queue was emptied and gets new items
+		if (this.queueInfo === undefined || (this.items.length === 0 && message.command !== "refreshQueue")) {
 			this.log("no queue for", message.command);
 			return 1002;
 		}
@@ -485,6 +486,8 @@ export class ConnectReceiver {
 
 	private async loadCloudQueue(message: Json) {
 		this.setServers(message);
+		// A new queue: the old window's position must not stay when the new window fails
+		this.clearItems();
 		const queueInfo = message.queueInfo;
 		if (queueInfo) {
 			this.queueInfo = {
@@ -564,7 +567,7 @@ export class ConnectReceiver {
 		let url = `${this.queueServer.serverUrl}/${queueId}/window?beforesize=${before}&aftersize=${after}&onlyactives=true`;
 		if (itemId !== undefined) url += `&itemid=${encodeURIComponent(itemId)}`;
 		try {
-			return await this.queueRequest("GET", url, undefined, timeoutMs);
+			return await this.queueRequest("GET", url, { timeoutMs });
 		} catch (err) {
 			this.log("queue window failed", err);
 			if (!quiet) this.queueServerError(err);
@@ -657,22 +660,26 @@ export class ConnectReceiver {
 		const reached = () => (end === "head" ? this.includesHead : this.includesTail);
 		const edgeId = () => this.itemIdOf(end === "head" ? this.items[0] : this.items[this.items.length - 1]);
 		const deadline = Date.now() + walkTimeMs;
+		// The server is too slow (not the queue too long): the phone is told like for a failed request, the queue does not end
+		const tooSlow = () => {
+			this.log("queue not walked to its", end, "in time");
+			this.restoreWindow(saved);
+			this.queueServerError(new Error("Queue server too slow"));
+			return "failed" as const;
+		};
 		let size = Math.max(walkWindowSize, phoneSize);
 		for (let moves = 0; !reached(); moves++) {
-			if (moves === maxWindowMoves || Date.now() > deadline) {
+			if (moves === maxWindowMoves) {
 				this.log("queue not walked to its", end, "in", moves, "windows");
 				this.restoreWindow(saved);
 				return "unreached";
 			}
+			if (Date.now() > deadline) return tooSlow();
 			const edge = edgeId();
 			let loaded = false;
 			while (!loaded) {
 				const remainingMs = deadline - Date.now();
-				if (remainingMs <= 0) {
-					this.log("queue not walked to its", end, "in time");
-					this.restoreWindow(saved);
-					return "unreached";
-				}
+				if (remainingMs <= 0) return tooSlow();
 				// The last try is the phone's own window, the one the server is known to send
 				const sizes =
 					size === phoneSize
@@ -754,7 +761,11 @@ export class ConnectReceiver {
 		return params ? `Bearer ${params.accessToken}` : undefined;
 	}
 
-	private async queueRequest(method: "GET" | "POST" | "PUT", url: string, body?: Json, timeoutMs = httpTimeoutMs, retried = false): Promise<Json> {
+	private async queueRequest(
+		method: "GET" | "POST" | "PUT",
+		url: string,
+		{ body, timeoutMs = httpTimeoutMs, retried = false }: { body?: Json; timeoutMs?: number; retried?: boolean } = {},
+	): Promise<Json> {
 		const server = this.queueServer;
 		if (server === undefined) throw new Error("No queue server");
 		if (!this.isTrustedUrl(url)) throw new Error(`Untrusted queue server ${url}`);
@@ -768,7 +779,7 @@ export class ConnectReceiver {
 			body: body === undefined ? undefined : JSON.stringify(body),
 			signal: AbortSignal.timeout(timeoutMs),
 		});
-		if (res.status === 401 && !retried && (await this.refreshToken())) return this.queueRequest(method, url, body, timeoutMs, true);
+		if (res.status === 401 && !retried && (await this.refreshToken())) return this.queueRequest(method, url, { body, timeoutMs, retried: true });
 		if (!res.ok) throw Object.assign(new Error(`Queue server HTTP ${res.status}`), { status: res.status });
 		const text = await res.text();
 		return text ? JSON.parse(text) : {};
@@ -782,7 +793,7 @@ export class ConnectReceiver {
 	private async putQueue(path: string, body: Json) {
 		if (this.queueServer === undefined || this.queueInfo === undefined) return false;
 		try {
-			await this.queueRequest("PUT", `${this.queueServer.serverUrl}/${this.queueInfo.queueId}/${path}`, body);
+			await this.queueRequest("PUT", `${this.queueServer.serverUrl}/${this.queueInfo.queueId}/${path}`, { body });
 			return true;
 		} catch (err) {
 			this.log(`queue ${path} failed`, err);

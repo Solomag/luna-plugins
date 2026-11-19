@@ -120,7 +120,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	};
 
 	const play = () => {
-		if (loadFailed) return;
+		// Not loaded (a timeout, the network was gone), a play tries again
+		if (loadFailed) return current && load(current.mediaId, current.mediaType, true);
 		if (ended !== undefined) {
 			const { mediaId, mediaType, seek: time } = ended;
 			return load(mediaId, mediaType, true).then(() => time !== undefined && seek(time));
@@ -147,6 +148,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			return;
 		}
 		if (unstarted) phoneSeek = time;
+		positionS = time;
 		PlayState.seek(time);
 	};
 
@@ -180,7 +182,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		loadFailed = !mediaItem;
 		loaded = phoneUid = undefined;
 		if (!mediaItem) {
-			PlayState.pause();
+			// What plays is not the phone's media: the previous one of the phone's, or the desktop's own after a resumed session
+			if (!resumed) PlayState.pause();
 			const unavailable = mediaItem === null && !resumed;
 			playerEvent({ type: "error", message: `Media ${mediaId} ${mediaItem === null ? "not found" : "could not be loaded"}`, unavailable });
 			return;
@@ -217,7 +220,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		if (phoneUid !== undefined && currentElement()?.uid === phoneUid) {
 			attach();
 			// The phone was told buffering until the player says what it does
-			if (ended === undefined) playerEvent({ type: "state", state: PlayState.playing ? "PLAYING" : "PAUSED" });
+			playerEvent({ type: "state", state: ended === undefined && PlayState.playing ? "PLAYING" : "PAUSED" });
 			return;
 		}
 		await load(mediaId, mediaType, false, true);
