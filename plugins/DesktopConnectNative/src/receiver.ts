@@ -265,7 +265,12 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		sessionUnloads.add(() => document.removeEventListener("playing", onVideoPlaying, true));
 		// The receiver picks what comes next from the phone's queue
 		redux.intercept("playbackControls/ENDED", sessionUnloads, ({ reason }) => {
-			if (reason === "completed") playerEvent({ type: "ended" });
+			if (reason === "completed") {
+				// TIDAL's player is left ended (the action is cancelled) and does not play it again after a seek,
+				// repeat one loads it again
+				loaded = undefined;
+				playerEvent({ type: "ended" });
+			}
 			return true;
 		});
 		redux.intercept("playbackControls/SKIP_NEXT", sessionUnloads, () => {
