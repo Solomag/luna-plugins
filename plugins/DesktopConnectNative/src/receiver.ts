@@ -41,18 +41,22 @@ const currentElement = () => PlayState.playQueue.elements[PlayState.playQueue.cu
 // The own TIDAL Connect receiver (receiver.native.ts) owns the phone's queue and session,
 // TIDAL's player here plays what it says and reports back. Returns false when it could not start (no key)
 export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
-	const started = await startReceiver(__TIDAL_SERVER_KEY_BASE64__).catch(trace.err.withContext("start receiver"));
-	if (started === undefined) return false;
-	trace.log(`TIDAL Connect receiver on port ${started.port}`);
+	// While the phone controls the player
+	const sessionUnloads = new Set<LunaUnload>();
+	let unloaded = false;
+	// Registered before the start: an unload while it starts stops it once started (the native side runs them in order)
 	unloads.add(() => {
+		unloaded = true;
 		unloadSet(sessionUnloads);
 		stopReceiver().catch(trace.err.withContext("stop receiver"));
 	});
+	const started = await startReceiver(__TIDAL_SERVER_KEY_BASE64__).catch(trace.err.withContext("start receiver"));
+	if (started === undefined) return false;
+	if (unloaded) return true;
+	trace.log(`TIDAL Connect receiver on port ${started.port}`);
 
 	// Commands come in bursts (load, seek, play) and loading is async, so run them one after another
 	let commands: Promise<unknown> = Promise.resolve();
-	let unloaded = false;
-	unloads.add(() => (unloaded = true));
 	ipcRenderer.on(unloads, receiverChannel, (command: PlayerCommand) => {
 		commands = commands.then(() => (unloaded ? undefined : run(command))).catch(trace.err.withContext(`receiver ${command.type}`));
 	});
@@ -73,8 +77,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	let pauseWhenPlaying = false;
 	// Set while the media playing is a video (TIDAL also has other video elements, animated covers)
 	let playingVideo = false;
-	// While the phone controls the player
-	const sessionUnloads = new Set<LunaUnload>();
+	// The phone's media TIDAL's player ended: the player is left ended, a play loads it again (at a seek made meanwhile)
+	let current: { mediaId: string; mediaType: number } | undefined;
+	let ended: { mediaId: string; mediaType: number; seek?: number } | undefined;
 
 	const run = async (command: PlayerCommand) => {
 		switch (command.type) {
@@ -101,6 +106,10 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 
 	const play = () => {
 		if (loadFailed) return;
+		if (ended !== undefined) {
+			const { mediaId, mediaType, seek: time } = ended;
+			return load(mediaId, mediaType, true).then(() => time !== undefined && seek(time));
+		}
 		paused = false;
 		pauseWhenPlaying = false;
 		// TIDAL's desired state, it may not be playing yet
@@ -118,12 +127,18 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	};
 	const seek = (time: number) => {
 		if (loadFailed) return;
+		if (ended !== undefined) {
+			ended.seek = time;
+			return;
+		}
 		if (unstarted) phoneSeek = time;
 		PlayState.seek(time);
 	};
 
 	const load = async (mediaId: string, mediaType: number, autoplay: boolean) => {
 		stopPendingSeek?.();
+		ended = undefined;
+		current = { mediaId, mediaType };
 		// Repeat one or the phone selecting the item playing: replacing the queue with the same item may keep TIDAL's old position
 		if (!loadFailed && loaded?.mediaId === mediaId && currentElement()?.uid === loaded.uid) {
 			attach();
@@ -269,6 +284,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 				// TIDAL's player is left ended (the action is cancelled) and does not play it again after a seek,
 				// repeat one loads it again
 				loaded = undefined;
+				ended = current && { ...current };
 				playerEvent({ type: "ended" });
 			}
 			return true;

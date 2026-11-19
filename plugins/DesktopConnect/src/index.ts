@@ -8,9 +8,10 @@ export const unloads = new Set<LunaUnload>();
 
 const { trace } = Tracer("[DesktopConnect]");
 trace.msg.warn("DesktopConnect is deprecated, please move to the new DesktopConnectNative plugin (TIDAL Connect without TIDAL's own receiver, also on Linux)");
-// Both would answer the phone (two devices), the one enabled last stays
+// Both would answer the phone (two devices), the one enabled last stays. Only when the user enables this one:
+// it is not enabled yet while it loads then, at startup both are and DesktopConnectNative stays
 const native = LunaPlugin.getByName("DesktopConnectNative");
-if (native?.enabled) {
+if (!LunaPlugin.getByName("DesktopConnect")?.enabled && native?.enabled) {
 	trace.msg.warn("Disabled DesktopConnectNative, both can't run at once");
 	native.disable().catch(trace.err.withContext("disable DesktopConnectNative"));
 }

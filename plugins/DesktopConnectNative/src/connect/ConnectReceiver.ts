@@ -77,6 +77,8 @@ const pingIntervalMs = 15_000;
 const pingTimeoutMs = 31_000;
 const progressIntervalMs = 1_000;
 const httpTimeoutMs = 30_000;
+// A queue longer than this many windows is not walked to its other end for repeat all
+const maxWindowMoves = 50;
 
 // The phone hands over its own tokens, they must only ever go to TIDAL's servers
 export const isTidalUrl = (url: string) => {
@@ -106,12 +108,14 @@ export class ConnectReceiver {
 
 	private session?: { id: string; members: Set<WebSocket>; suspended: boolean };
 
-	// The queue the phone loaded
-	private contentServer?: ServerInfo;
+	// The queue the phone loaded, the queue server sends a window of it around the current item
 	private queueServer?: ServerInfo;
 	private queueInfo?: QueueInfo;
 	private items: Json[] = [];
 	private index?: number;
+	// Whether the window reaches the queue's first and last item
+	private includesHead = true;
+	private includesTail = true;
 	private media?: MediaInfo;
 
 	// What the player reported last
@@ -360,20 +364,22 @@ export class ConnectReceiver {
 				await this.loadWindow(this.currentItemId());
 				this.toSession({ command: "notifyQueueItemsChanged", queueInfo: this.queueInfo, reason: "REFRESH_REQUESTED" });
 				return 0;
+			// Only a change the queue server saved is kept, the phone reads the queue back from there
 			case "setRepeatMode": {
 				const repeatMode = repeatModeOf(message.repeatMode);
-				this.queueInfo.repeatMode = repeatMode;
 				// The queue server's names are lower case and "off" for none
-				await this.putQueue("repeatmode", { repeat_mode: repeatMode === "NONE" ? "off" : repeatMode.toLowerCase() });
+				if (await this.putQueue("repeatmode", { repeat_mode: repeatMode === "NONE" ? "off" : repeatMode.toLowerCase() }))
+					this.queueInfo.repeatMode = repeatMode;
 				this.toSession({ command: "notifyQueueItemsChanged", queueInfo: this.queueInfo, reason: "REPEAT_MODE_CHANGED" });
 				return 0;
 			}
 			case "setShuffle": {
 				const shuffle = message.shuffle === true;
-				this.queueInfo.shuffled = shuffle;
-				await this.putQueue("shuffle", { shuffle });
-				// The server reorders the queue, the window around the current item changes
-				await this.loadWindow(this.currentItemId());
+				if (await this.putQueue("shuffle", { shuffle })) {
+					this.queueInfo.shuffled = shuffle;
+					// The server reorders the queue, the window around the current item changes
+					await this.loadWindow(this.currentItemId());
+				}
 				this.toSession({ command: "notifyQueueItemsChanged", queueInfo: this.queueInfo, reason: "SHUFFLE_CHANGED" });
 				return 0;
 			}
@@ -426,16 +432,17 @@ export class ConnectReceiver {
 	}
 
 	private clearQueue() {
-		this.contentServer = this.queueServer = this.queueInfo = this.index = this.media = undefined;
+		this.queueServer = this.queueInfo = this.index = this.media = undefined;
 		this.items = [];
+		this.includesHead = this.includesTail = true;
 		this.playerState = "IDLE";
 		this.positionMs = 0;
 	}
 	// #endregion
 
 	// #region Queue
+	// The content server is TIDAL's player's business, only the queue server is used here
 	private setServers(message: Json) {
-		if (message.contentServerInfo) this.contentServer = message.contentServerInfo;
 		if (message.queueServerInfo) this.queueServer = message.queueServerInfo;
 	}
 
@@ -470,18 +477,20 @@ export class ConnectReceiver {
 			window = await this.queueRequest("GET", url);
 		} catch (err) {
 			this.log("queue window failed", err);
-			this.toSession({ command: "notifyQueueServerError", errorCode: (err as { status?: number }).status ?? 0, details: { description: String(err) } });
+			this.queueServerError(err);
 			return;
 		}
 		const items = window.items ?? window.mediaInfos;
-		if (Array.isArray(items) && items.length !== 0) this.items = items;
+		if (Array.isArray(items) && items.length !== 0) {
+			this.items = items;
+			this.includesHead = window.includes_head !== false;
+			this.includesTail = window.includes_tail !== false;
+		}
 		const currentId = window.itemId ?? itemId ?? this.media?.itemId;
 		let index = this.items.findIndex((item) => this.itemIdOf(item) === currentId);
 		const currentMediaId = mediaId ?? this.media?.mediaId;
 		if (index === -1 && currentMediaId !== undefined) index = this.items.findIndex((item) => this.mediaIdOf(item) === currentMediaId);
 		if (index !== -1) this.index = index;
-		if (typeof window.repeatMode === "string") this.queueInfo.repeatMode = repeatModeOf(window.repeatMode);
-		if (typeof window.shuffle === "boolean") this.queueInfo.shuffled = window.shuffle;
 		this.log("queue window", this.items.length, "items, current", this.index);
 	}
 
@@ -491,8 +500,17 @@ export class ConnectReceiver {
 		const { repeatMode } = this.queueInfo;
 		if (ended && repeatMode === "ONE") return this.playItem(this.index);
 		let next = this.index + by;
-		if (next < 0) next = repeatMode === "ALL" ? this.items.length - 1 : 0;
-		if (next >= this.items.length) {
+		// The window ends before the queue does (it was not moved in time), move it over the current item
+		if ((next < 0 && !this.includesHead) || (next >= this.items.length && !this.includesTail)) {
+			await this.loadWindow(this.currentItemId());
+			next = (this.index ?? 0) + by;
+		}
+		if (next < 0) {
+			if (repeatMode === "ALL") {
+				await this.moveWindowTo("tail");
+				next = this.items.length - 1;
+			} else next = 0;
+		} else if (next >= this.items.length) {
 			if (repeatMode !== "ALL") {
 				// The end of the queue
 				if (ended) {
@@ -501,11 +519,22 @@ export class ConnectReceiver {
 				}
 				return;
 			}
+			await this.moveWindowTo("head");
 			next = 0;
 		}
 		this.playItem(next);
 		// Keep the window centred, the next items must be known before the track ends
 		if (next >= this.items.length - 2 || next <= 1) await this.loadWindow(this.itemIdOf(this.items[next]));
+	}
+
+	// Repeat all goes round to the other end of the queue, the window may not reach it
+	private async moveWindowTo(end: "head" | "tail") {
+		for (let moves = 0; moves < maxWindowMoves && !(end === "head" ? this.includesHead : this.includesTail); moves++) {
+			const items = this.items;
+			await this.loadWindow(this.itemIdOf(end === "head" ? items[0] : items[items.length - 1]));
+			// The queue server failed, the window stays
+			if (this.items === items) return;
+		}
 	}
 
 	private playItem(index: number) {
@@ -582,13 +611,20 @@ export class ConnectReceiver {
 		return text ? JSON.parse(text) : {};
 	}
 
-	// Changes the phone's queue on the queue server, the phone reads it back from there
+	private queueServerError(err: unknown) {
+		this.toSession({ command: "notifyQueueServerError", errorCode: (err as { status?: number }).status ?? 0, details: { description: String(err) } });
+	}
+
+	// Changes the phone's queue on the queue server, the phone reads it back from there. False when it was not saved
 	private async putQueue(path: string, body: Json) {
-		if (this.queueServer === undefined || this.queueInfo === undefined) return;
+		if (this.queueServer === undefined || this.queueInfo === undefined) return false;
 		try {
 			await this.queueRequest("PUT", `${this.queueServer.serverUrl}/${this.queueInfo.queueId}/${path}`, body);
+			return true;
 		} catch (err) {
 			this.log(`queue ${path} failed`, err);
+			this.queueServerError(err);
+			return false;
 		}
 	}
 

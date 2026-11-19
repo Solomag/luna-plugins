@@ -10,7 +10,7 @@ import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect
 import tidalCert from "file://./connect/tidal_server_cert.pem";
 
 type Running = { receiver: ConnectReceiver; service: CiaoService; watchAddresses?: NodeJS.Timeout };
-declare const luna: { __desktopConnectNativeReceiver?: Running };
+declare const luna: { __desktopConnectNativeReceiver?: Running; __desktopConnectNativeChange?: Promise<unknown> };
 
 const receiverChannel = "desktopConnectNative.receiver";
 
@@ -22,6 +22,13 @@ const keyFile = "tidal_server_key.pem";
 // Luna evaluates the native module again (in a new sandbox) when the plugin reloads, so the running receiver is kept on luna,
 // otherwise the next stopReceiver would not find it and it would hold the port
 const running = luna;
+
+// A stop while the receiver starts (the plugin unloaded quickly) runs after the start, and a start after a stop, also across reloads
+const oneAtATime = <T>(change: () => Promise<T>): Promise<T> => {
+	const result = (running.__desktopConnectNativeChange ?? Promise.resolve()).catch(() => {}).then(change);
+	running.__desktopConnectNativeChange = result;
+	return result;
+};
 
 // TIDAL's page (luna.tidalWindow is not set in the main process)
 const toPlayer = (command: PlayerCommand) => {
@@ -66,7 +73,9 @@ const listen = async (cert: string | Buffer, key: string | Buffer) => {
 	try {
 		return { receiver: await ConnectReceiver.start(options) };
 	} catch (err) {
-		log(`Port ${connectPort} is taken (TIDAL's own receiver), listening on the network addresses`, (err as NodeJS.ErrnoException).code ?? err);
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "EADDRINUSE") log(`Port ${connectPort} is taken (TIDAL's own receiver), listening on the network addresses`);
+		else log(`Cannot listen on port ${connectPort} on all addresses, trying the network addresses`, code ?? err);
 	}
 	const receiver = await ConnectReceiver.start({ ...options, hosts: lanAddresses() });
 	if (!receiver.listening) log(`Cannot listen on port ${connectPort} on any network address yet, phones will not find the receiver`);
@@ -75,7 +84,8 @@ const listen = async (cert: string | Buffer, key: string | Buffer) => {
 };
 
 // Starts the own receiver, undefined without a key
-export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: number } | undefined> => {
+export const startReceiver = (builtInKeyBase64: string) => oneAtATime(() => start(builtInKeyBase64));
+const start = async (builtInKeyBase64: string): Promise<{ port: number } | undefined> => {
 	if (running.__desktopConnectNativeReceiver) return { port: running.__desktopConnectNativeReceiver.receiver.port };
 	const keys = await loadKeys(builtInKeyBase64);
 	if (keys === undefined) return undefined;
@@ -101,7 +111,8 @@ export const startReceiver = async (builtInKeyBase64: string): Promise<{ port: n
 	return { port: receiver.port };
 };
 
-export const stopReceiver = async () => {
+export const stopReceiver = () => oneAtATime(stop);
+const stop = async () => {
 	const current = running.__desktopConnectNativeReceiver;
 	if (current === undefined) return;
 	running.__desktopConnectNativeReceiver = undefined;
