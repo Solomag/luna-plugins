@@ -6,6 +6,9 @@ import { playerEvent, startReceiver, stopReceiver } from "./receiver.native";
 
 const { trace } = Tracer("[DesktopConnect.receiver]");
 
+// TIDAL's desktop server key, set at build time from the TIDAL_SERVER_KEY_PEM environment variable (esbuild.config.ts), empty without it
+declare const __TIDAL_SERVER_KEY_PEM__: string;
+
 // Same as in receiver.native.ts
 const receiverChannel = "desktopConnect.receiver";
 // Loading a video can take over 5s
@@ -38,7 +41,7 @@ const currentElement = () => PlayState.playQueue.elements[PlayState.playQueue.cu
 // The own TIDAL Connect receiver (receiver.native.ts) owns the phone's queue and session,
 // TIDAL's player here plays what it says and reports back. Returns false when it could not start (no key)
 export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
-	const started = await startReceiver().catch(trace.err.withContext("start receiver"));
+	const started = await startReceiver(__TIDAL_SERVER_KEY_PEM__).catch(trace.err.withContext("start receiver"));
 	if (started === undefined) return false;
 	trace.log(`TIDAL Connect receiver on port ${started.port}`);
 	unloads.add(() => {

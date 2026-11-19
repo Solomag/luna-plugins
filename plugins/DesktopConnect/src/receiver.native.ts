@@ -6,13 +6,15 @@ import { hostname } from "os";
 import path from "path";
 
 import { ConnectReceiver, type PlayerCommand, type PlayerEvent } from "./connect/ConnectReceiver";
+// TIDAL's desktop server certificate, public. The phone only trusts it (signed by TIDAL's CA)
+import tidalCert from "file://./connect/tidal_server_cert.pem";
 
 type Running = { receiver: ConnectReceiver; service: CiaoService };
 declare const luna: { __desktopConnectReceiver?: Running };
 
 const receiverChannel = "desktopConnect.receiver";
 
-// TIDAL's desktop certificate and its key, the phone only connects to a receiver with them. Not shipped with the plugin
+// A certificate and key in this folder replace the built-in ones (development, tests)
 export const keyFolder = () => path.join(app.getPath("userData"), "DesktopConnect");
 const certFile = "tidal_server_cert.pem";
 const keyFile = "tidal_server_key.pem";
@@ -32,15 +34,25 @@ const log = (...args: unknown[]) => console.log("[DesktopConnect.receiver]", ...
 // Not TIDAL's own device id (its receiver may be advertised too), stable so the phone remembers the device
 const deviceId = () => createHash("md5").update(`TidaLuna:${hostname()}`).digest("hex");
 
-// Starts the own receiver, undefined when the certificate or key is missing
-export const startReceiver = async (): Promise<{ port: number } | undefined> => {
-	if (running.__desktopConnectReceiver) return { port: running.__desktopConnectReceiver.receiver.port };
+// The certificate and key from the key folder, otherwise TIDAL's certificate with the key the plugin was built with
+const loadKeys = async (builtInKey: string) => {
 	const folder = keyFolder();
 	const [cert, key] = await Promise.all([readFile(path.join(folder, certFile)), readFile(path.join(folder, keyFile))]).catch(() => []);
-	if (cert === undefined || key === undefined) {
-		log(`No ${certFile} and ${keyFile} in ${folder}, the own receiver is off`);
-		return undefined;
+	if (cert !== undefined && key !== undefined) {
+		log(`Using ${certFile} and ${keyFile} from ${folder}`);
+		return { cert, key };
 	}
+	if (builtInKey !== "") return { cert: tidalCert, key: builtInKey };
+	log(`Built without TIDAL's server key and no ${certFile} and ${keyFile} in ${folder}, the own receiver is off`);
+	return undefined;
+};
+
+// Starts the own receiver, undefined without a key
+export const startReceiver = async (builtInKey: string): Promise<{ port: number } | undefined> => {
+	if (running.__desktopConnectReceiver) return { port: running.__desktopConnectReceiver.receiver.port };
+	const keys = await loadKeys(builtInKey);
+	if (keys === undefined) return undefined;
+	const { cert, key } = keys;
 	// TIDAL's own receiver may use 9000, any port works as the phone takes it from the mDNS record
 	const receiver = await ConnectReceiver.start({ cert, key, port: 9000, toPlayer, log }).catch((err) => {
 		log("Port 9000 is taken, using a free one", err.code ?? err);
