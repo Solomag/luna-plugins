@@ -115,6 +115,8 @@ export class ConnectReceiver {
 	private queueInfo?: QueueInfo;
 	private items: Json[] = [];
 	private index?: number;
+	// The current item was removed from the queue: index is the item that followed it
+	private currentRemoved = false;
 	// Whether the window reaches the queue's first and last item
 	private includesHead = true;
 	private includesTail = true;
@@ -362,7 +364,10 @@ export class ConnectReceiver {
 				const media = message.mediaInfo ? this.mediaInfoOf(message.mediaInfo) : undefined;
 				if (media === undefined) return 0;
 				const index = this.items.findIndex((item) => this.itemIdOf(item) === media.itemId);
-				if (index !== -1) this.index = index;
+				if (index !== -1) {
+					this.index = index;
+					this.currentRemoved = false;
+				}
 				this.setMedia(media);
 				await this.loadWindow(media.itemId);
 				return 0;
@@ -447,6 +452,7 @@ export class ConnectReceiver {
 	private clearItems() {
 		this.items = [];
 		this.index = undefined;
+		this.currentRemoved = false;
 		this.includesHead = this.includesTail = true;
 	}
 	// #endregion
@@ -478,7 +484,13 @@ export class ConnectReceiver {
 	}
 
 	// The part of the cloud queue around an item. False when the queue server failed
-	private async loadWindow(itemId?: string, mediaId?: string, sizes?: { before: number; after: number }, quiet = false) {
+	private async loadWindow(
+		itemId?: string,
+		mediaId?: string,
+		sizes?: { before: number; after: number },
+		quiet = false,
+		retried = false,
+	): Promise<boolean> {
 		if (this.queueInfo === undefined || this.queueServer === undefined) return false;
 		const { queueId, maxBeforeSize, maxAfterSize } = this.queueInfo;
 		const { before, after } = sizes ?? { before: maxBeforeSize, after: maxAfterSize };
@@ -494,6 +506,9 @@ export class ConnectReceiver {
 		}
 		const items = window.items ?? window.mediaInfos;
 		const replaced = Array.isArray(items) && items.length !== 0;
+		// The items around the current one, it may be gone from the new window
+		const previousId = this.index === undefined ? undefined : this.itemIdOf(this.items[this.index - 1]);
+		const nextId = this.index === undefined ? undefined : this.itemIdOf(this.items[this.currentRemoved ? this.index : this.index + 1]);
 		if (replaced) {
 			this.items = items;
 			this.includesHead = window.includes_head !== false;
@@ -503,9 +518,23 @@ export class ConnectReceiver {
 		let index = this.items.findIndex((item) => this.itemIdOf(item) === currentId);
 		const currentMediaId = mediaId ?? this.media?.mediaId;
 		if (index === -1 && currentMediaId !== undefined) index = this.items.findIndex((item) => this.mediaIdOf(item) === currentMediaId);
-		// Not in the new window (removed from the queue): no position, the old one would point at another item
-		if (index !== -1) this.index = index;
-		else if (replaced) this.index = undefined;
+		if (index !== -1) {
+			this.index = index;
+			this.currentRemoved = false;
+		} else if (replaced) {
+			// Removed from the queue: the queue goes on with the item after it (or ends after the one before it)
+			const nextIndex = this.items.findIndex((item) => nextId !== undefined && this.itemIdOf(item) === nextId);
+			const previousIndex = this.items.findIndex((item) => previousId !== undefined && this.itemIdOf(item) === previousId);
+			this.currentRemoved = nextIndex !== -1;
+			this.index = nextIndex !== -1 ? nextIndex : previousIndex !== -1 ? previousIndex : undefined;
+			const neighbourId = nextId ?? previousId;
+			if (this.index === undefined && neighbourId !== undefined && !retried) {
+				// The window is elsewhere (the server did not find the removed item), ask for the one around its neighbour
+				if (!(await this.loadWindow(neighbourId, undefined, sizes, quiet, true))) return false;
+				this.currentRemoved = this.index !== undefined && nextId !== undefined && this.itemIdOf(this.items[this.index]) === nextId;
+				return true;
+			}
+		}
 		this.log("queue window", this.items.length, "items, current", this.index);
 		return true;
 	}
@@ -514,17 +543,23 @@ export class ConnectReceiver {
 	private async step(by: 1 | -1, ended: boolean) {
 		if (this.index === undefined || this.queueInfo === undefined) return;
 		const { repeatMode } = this.queueInfo;
-		if (ended && repeatMode === "ONE") return this.playItem(this.index);
-		let next = this.index + by;
+		if (ended && repeatMode === "ONE") {
+			// The removed item still plays again, it is the phone's media
+			if (this.currentRemoved && this.media !== undefined) return this.setMedia(this.media);
+			return this.playItem(this.index);
+		}
+		// Index is already the item after a removed current one
+		let next = this.currentRemoved && by === 1 ? this.index : this.index + by;
 		// The window ends before the queue does (it was not moved in time), move it over the current item.
 		// When that fails the queue goes on, the phone was told about the error and can try again
 		if ((next < 0 && !this.includesHead) || (next >= this.items.length && !this.includesTail)) {
 			if (!(await this.loadWindow(this.currentItemId())) || this.index === undefined) return;
-			next = this.index + by;
+			next = this.currentRemoved && by === 1 ? this.index : this.index + by;
 		}
 		if (next < 0) {
 			if (repeatMode === "ALL") {
-				await this.moveWindowTo("tail");
+				// The queue server failed (the phone was told), not the queue's other end
+				if (!(await this.moveWindowTo("tail"))) return;
 				next = this.items.length - 1;
 			} else next = 0;
 		} else if (next >= this.items.length) {
@@ -536,7 +571,7 @@ export class ConnectReceiver {
 				}
 				return;
 			}
-			await this.moveWindowTo("head");
+			if (!(await this.moveWindowTo("head"))) return;
 			next = 0;
 		}
 		this.playItem(next);
@@ -547,6 +582,7 @@ export class ConnectReceiver {
 
 	// Repeat all goes round to the other end of the queue, the window may not reach it.
 	// It moves in long windows (fewer requests while the phone's commands wait), shorter ones down to the phone's size when the server refuses them
+	// False when the queue server failed
 	private async moveWindowTo(end: "head" | "tail") {
 		const { maxBeforeSize, maxAfterSize } = this.queueInfo!;
 		const phoneSize = end === "head" ? maxBeforeSize : maxAfterSize;
@@ -568,15 +604,18 @@ export class ConnectReceiver {
 				if (loaded || size === phoneSize) break;
 				size = Math.max(Math.floor(size / 2), phoneSize);
 			}
-			// The queue server failed, the window stays
-			if (!loaded || this.items === items) return;
+			if (!loaded) return false;
+			// Nothing new (the server sent the same window), it does not get further
+			if (this.items === items) break;
 		}
+		return true;
 	}
 
 	private playItem(index: number) {
 		const item = this.items[index];
 		if (item === undefined) return;
 		this.index = index;
+		this.currentRemoved = false;
 		this.setMedia(this.mediaInfoOf(item));
 	}
 
