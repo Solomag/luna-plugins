@@ -38,6 +38,5 @@ export const setup = () => {
 		console.log("DesktopConnect.remotePlayerProcess.stdout", ...args)
 	);
 };
-setup();
 
 export const send = websocket.send.bind(websocket);

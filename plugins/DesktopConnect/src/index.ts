@@ -1,10 +1,14 @@
 import { LunaUnload, unloadSet } from "@luna/core";
 import { ipcRenderer, MediaItem, PlayState, redux } from "@luna/lib";
-import { send } from "./remoteService.native";
+import { startOwnReceiver } from "./receiver";
+import { send, setup } from "./remoteService.native";
 
 export * from "./remoteService.native";
 
 export const unloads = new Set<LunaUnload>();
+
+// The own TIDAL Connect receiver when TIDAL's certificate and key are in place, otherwise TIDAL's (original.asar and its native process)
+if (!(await startOwnReceiver(unloads))) await setup();
 
 // #region From remote
 ipcRenderer.on(unloads, "remote.desktop.notify.media.changed", async ({ mediaId }) => {
