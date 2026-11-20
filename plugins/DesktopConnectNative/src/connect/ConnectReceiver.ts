@@ -936,9 +936,12 @@ export class ConnectReceiver {
 				// TIDAL reports the previous media paused afterwards
 				this.finished = true;
 				return;
+			// The desktop's next and previous, also not in the phone's queue once it stopped
 			case "next":
+				if (this.media === undefined) return;
 				return this.step(1, false);
 			case "previous":
+				if (this.media === undefined) return;
 				return this.step(-1, false);
 			case "play":
 				return this.play();
