@@ -28,7 +28,8 @@ export type PlayerState = "IDLE" | "BUFFERING" | "PAUSED" | "PLAYING";
 // Heard from the player
 export type PlayerEvent =
 	| { type: "state"; state: PlayerState }
-	| { type: "progress"; positionMs: number }
+	// seeked: a jump (a desktop seek), told the phone at once also right after another update
+	| { type: "progress"; positionMs: number; seeked?: boolean }
 	| { type: "ended" }
 	// unavailable: TIDAL does not have the media (not a timeout or a failed request), the queue goes on past it
 	| { type: "error"; message?: string; unavailable?: boolean }
@@ -915,7 +916,7 @@ export class ConnectReceiver {
 				if (!Number.isFinite(event.positionMs) || this.finished) return;
 				this.positionMs = event.positionMs;
 				const now = Date.now();
-				if (now - this.lastProgressSent < progressIntervalMs) return;
+				if (event.seeked !== true && now - this.lastProgressSent < progressIntervalMs) return;
 				this.lastProgressSent = now;
 				return this.toSession(this.playerStatus());
 			}

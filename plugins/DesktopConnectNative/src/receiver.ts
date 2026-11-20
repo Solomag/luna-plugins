@@ -75,12 +75,13 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	let phoneUid: string | undefined;
 	// Seconds into the phone's media, as reported to the phone
 	let positionS = 0;
-	const progress = (seconds: number) => {
+	const progress = (seconds: number, seeked = false) => {
 		if (!Number.isFinite(seconds)) return;
-		// Not the phone's media playing (it was not loaded): the phone's position stays for a play to load it at
-		if (loadFailed) return;
+		// Not the phone's media playing (it was not loaded): the phone's position stays for a play to load it at.
+		// While it loads a late position is the previous media's
+		if (loadFailed || loading) return;
 		positionS = seconds;
-		playerEvent({ type: "progress", positionMs: seconds * 1000 });
+		playerEvent({ type: "progress", positionMs: seconds * 1000, seeked });
 	};
 	// TIDAL ignores a seek on a video it has not started yet (it loads it again on play and starts from the beginning),
 	// and sometimes does the same for a track loaded right after a video, so the phone's seek is applied again once it plays
@@ -175,6 +176,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		// Repeat one or the phone selecting the item playing: replacing the queue with the same item may keep TIDAL's old position
 		if (!loadFailed && loaded?.mediaId === mediaId && currentElement()?.uid === loaded.uid) {
 			attach();
+			// From the start, not where the phone's earlier seek waits for it to start
+			unstarted = false;
+			phoneSeek = undefined;
 			PlayState.seek(0);
 			if (autoplay) play();
 			else {
@@ -376,13 +380,25 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			return true;
 		});
 		// A seek on the desktop (also back/forward and previous, which restarts the track) is newer than the phone's
-		for (const action of ["playbackControls/SEEK", "playbackControls/SEEK_BACKWARDS", "playbackControls/SEEK_FORWARDS"] as const)
-			redux.intercept(action, sessionUnloads, () => stopPendingSeek?.());
+		// Not started yet: the desktop's seek replaces the phone's one applied on play
+		redux.intercept("playbackControls/SEEK", sessionUnloads, (time) => {
+			stopPendingSeek?.();
+			if (unstarted) phoneSeek = time;
+			// Also paused (TIDAL reports no position then)
+			if (ended === undefined) progress(time, true);
+		});
+		for (const action of ["playbackControls/SEEK_BACKWARDS", "playbackControls/SEEK_FORWARDS"] as const)
+			redux.intercept(action, sessionUnloads, () => {
+				stopPendingSeek?.();
+				if (unstarted) phoneSeek = undefined;
+			});
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
 			stopPendingSeek?.();
-			// Like TIDAL's own button: a track a few seconds in starts again
-			if (ended === undefined && !loadFailed && positionS > restartAfterS) PlayState.seek(0);
-			else playerEvent({ type: "previous" });
+			// Like TIDAL's own button: a track a few seconds in starts again (the phone's seek waiting for the start too)
+			if (ended === undefined && !loadFailed && positionS > restartAfterS) {
+				seek(0);
+				progress(0, true);
+			} else playerEvent({ type: "previous" });
 			return true;
 		});
 	};
