@@ -373,9 +373,12 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			const { referenceId } = mediaProduct;
 			if (!loading && phoneElement !== undefined && referenceId !== undefined && referenceId !== phoneElement) {
 				stopPendingSeek?.();
-				// Told once (the release follows)
-				routedUid = ended = current = phoneUid = loaded = undefined;
-				loadFailed = false;
+				// TIDAL keeps a seek made before a track started for whatever starts next: the phone's start position, not the desktop's
+				if (unstarted) PlayState.seek(0);
+				// Told once (the release follows). Until it does the phone's waiting seek and held pause must not apply to the desktop's media
+				routedUid = ended = current = phoneUid = loaded = phoneSeek = undefined;
+				loadFailed = unstarted = paused = pauseWhenPlaying = false;
+				clearTimeout(pauseTimeout);
 				playerEvent({ type: "takenOver" });
 			}
 		});
