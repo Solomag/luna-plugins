@@ -110,7 +110,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			case "play":
 				return play();
 			case "stop":
-				routedUid = undefined;
+				// The phone let go of its media: the desktop's seek and play of it are TIDAL's own
+				routedUid = ended = undefined;
+				loadFailed = false;
 				return pause();
 			case "pause":
 				return pause();

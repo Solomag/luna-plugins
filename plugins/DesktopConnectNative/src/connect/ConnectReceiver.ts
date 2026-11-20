@@ -922,6 +922,8 @@ export class ConnectReceiver {
 				return this.toSession(this.playerStatus());
 			}
 			case "ended":
+				// Stopped by the phone: what the desktop played after it does not go on in the phone's queue
+				if (this.media === undefined) return;
 				return this.step(1, true);
 			case "error":
 				this.toSession({ command: "notifyPlaybackError", statusCode: event.message ?? "error" });
