@@ -391,7 +391,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			// Also paused (TIDAL reports no position then)
 			else progress(time, true);
 		});
-		// The player's position once it moved (its time before it started is not the phone's media's).
+		// The player's position once it moved, while paused (playing, its signals tell it; before it started it is not the phone's media's).
 		// TIDAL's state, PlayState.currentTime keeps reading the first player (a track's after a video)
 		let seekedTimeout: number | undefined;
 		sessionUnloads.add(() => clearTimeout(seekedTimeout));
@@ -401,7 +401,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 				if (unstarted) phoneSeek = undefined;
 				clearTimeout(seekedTimeout);
 				seekedTimeout = window.setTimeout(() => {
-					if (ended === undefined && !unstarted) progress(PlayState.playbackControls.latestCurrentTime, true);
+					const { latestCurrentTime, playbackState } = PlayState.playbackControls;
+					if (ended === undefined && !unstarted && playbackState !== "PLAYING") progress(latestCurrentTime, true);
 				}, 500);
 			});
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
