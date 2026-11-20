@@ -36,7 +36,9 @@ export type PlayerEvent =
 	| { type: "error"; message?: string; unavailable?: boolean }
 	// The desktop user pressed next or previous
 	| { type: "next" }
-	| { type: "previous" };
+	| { type: "previous" }
+	// The desktop user pressed play on the phone's media that ended or could not be loaded, played like the phone's play
+	| { type: "play" };
 
 type Json = Record<string, any>;
 
@@ -325,8 +327,7 @@ export class ConnectReceiver {
 		const toPlayer = this.options.toPlayer;
 		switch (message.command) {
 			case "play":
-				this.finished = false;
-				if (this.media !== undefined) toPlayer({ type: "play" });
+				this.play();
 				return 0;
 			case "pause":
 				if (this.media !== undefined) toPlayer({ type: "pause" });
@@ -937,7 +938,15 @@ export class ConnectReceiver {
 				return this.step(1, false);
 			case "previous":
 				return this.step(-1, false);
+			case "play":
+				return this.play();
 		}
+	}
+
+	// The phone's or the desktop's play, also of a media that ended (the player loads it again)
+	private play() {
+		this.finished = false;
+		if (this.media !== undefined) this.options.toPlayer({ type: "play" });
 	}
 	// #endregion
 }

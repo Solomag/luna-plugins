@@ -341,6 +341,12 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		redux.intercept("playbackControls/PLAY", sessionUnloads, () => {
 			paused = false;
 			pauseWhenPlaying = false;
+			// The phone's media ended or was not loaded: TIDAL would play its own (the ended one from the start, or the previous one)
+			// without the phone knowing, the receiver plays it like the phone's play
+			if (ended !== undefined || loadFailed) {
+				playerEvent({ type: "play" });
+				return true;
+			}
 		});
 		redux.intercept("playbackControls/PAUSE", sessionUnloads, () => {
 			paused = true;
