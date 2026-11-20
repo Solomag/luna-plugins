@@ -94,6 +94,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	// The phone's media TIDAL's player ended: the player is left ended, a play loads it again (at a seek made meanwhile)
 	let current: { mediaId: string; mediaType: number } | undefined;
 	let ended: { mediaId: string; mediaType: number; seek?: number } | undefined;
+	// TIDAL's element left when the phone's media ended or failed to load: the desktop's play of it goes through the receiver.
+	// Unset when the phone stops (the desktop's play is its own then), another element is the desktop's own
+	let routedUid: string | undefined;
 	// While the phone controls the player TIDAL's own repeat stays off (repeat is the receiver's, its queue),
 	// the desktop's repeat mode is kept here (also one the desktop user picks meanwhile) and set again when the phone lets go
 	let desktopRepeatMode: redux.RepeatMode = redux.RepeatMode.Off;
@@ -106,8 +109,10 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 				return load(command.mediaId, command.mediaType, command.autoplay, false, command.positionMs / 1000);
 			case "play":
 				return play();
-			case "pause":
 			case "stop":
+				routedUid = undefined;
+				return pause();
+			case "pause":
 				return pause();
 			case "seek":
 				return seek(command.positionMs / 1000);
@@ -200,6 +205,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		loadFailed = !mediaItem;
 		loaded = phoneUid = undefined;
 		if (!mediaItem) {
+			routedUid = currentElement()?.uid;
 			// Where a play loads it again
 			positionS = at > 0 ? at : 0;
 			// What plays is not the phone's media: the previous one of the phone's, or the desktop's own after a resumed session
@@ -339,14 +345,14 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		});
 		// A play from anywhere (also on the desktop) is newer than the phone's pause
 		redux.intercept("playbackControls/PLAY", sessionUnloads, () => {
-			paused = false;
-			pauseWhenPlaying = false;
 			// The phone's media ended or was not loaded: TIDAL would play its own (the ended one from the start, or the previous one)
-			// without the phone knowing, the receiver plays it like the phone's play
-			if (ended !== undefined || loadFailed) {
+			// without the phone knowing, the receiver plays it like the phone's play. Not a play of what the desktop picked itself
+			if ((ended !== undefined || loadFailed) && routedUid !== undefined && currentElement()?.uid === routedUid) {
 				playerEvent({ type: "play" });
 				return true;
 			}
+			paused = false;
+			pauseWhenPlaying = false;
 		});
 		redux.intercept("playbackControls/PAUSE", sessionUnloads, () => {
 			paused = true;
@@ -379,6 +385,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 				// repeat one loads it again
 				loaded = undefined;
 				ended = current && { ...current };
+				routedUid = currentElement()?.uid;
 				playerEvent({ type: "ended" });
 			}
 			return true;

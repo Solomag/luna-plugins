@@ -944,9 +944,11 @@ export class ConnectReceiver {
 	}
 
 	// The phone's or the desktop's play, also of a media that ended (the player loads it again)
+	// Without a media (stopped) nothing plays, the player's states stay the phone's no more
 	private play() {
+		if (this.media === undefined) return;
 		this.finished = false;
-		if (this.media !== undefined) this.options.toPlayer({ type: "play" });
+		this.options.toPlayer({ type: "play" });
 	}
 	// #endregion
 }
