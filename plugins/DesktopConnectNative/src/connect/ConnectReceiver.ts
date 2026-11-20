@@ -148,6 +148,8 @@ export class ConnectReceiver {
 	// Set at the end of the queue: TIDAL still reports the stopped track (paused), the phone must see the receiver idle
 	private finished = false;
 	private failedInARow = 0;
+	// Counted at once (not in turn) when the desktop takes the player: a step still waiting for the queue server then loads nothing
+	private takeovers = 0;
 	// Whether the media was loaded to play, a media skipped after it starts the same way
 	private autoplay = true;
 
@@ -625,6 +627,7 @@ export class ConnectReceiver {
 		const serverFailed = () => {
 			if (ended) this.setPlayerState("PAUSED");
 		};
+		const takeovers = this.takeovers;
 		// No window known (its request failed): load it around the current item first
 		if (this.index === undefined && this.queueInfo !== undefined && this.media?.itemId !== undefined) {
 			if (!(await this.loadWindow({ itemId: this.media.itemId, mediaId: this.media.mediaId }))) return serverFailed();
@@ -638,6 +641,9 @@ export class ConnectReceiver {
 			return;
 		}
 		const { repeatMode } = this.queueInfo;
+		// The desktop played its own media while the queue server answered: that plays, not the phone's next
+		const takenOver = () => this.takeovers !== takeovers;
+		if (takenOver()) return;
 		if (ended && !failed && repeatMode === "ONE") {
 			// The removed item still plays again, it is the phone's media
 			if (this.removed !== undefined && this.media !== undefined) return this.setMedia(this.media);
@@ -668,6 +674,7 @@ export class ConnectReceiver {
 			}
 			next = 0;
 		}
+		if (takenOver()) return;
 		// A skipped media's next one starts like it, paused when it was loaded paused
 		this.playItem(next, !failed || this.autoplay);
 		// Keep the window centred, the next items must be known before the track ends (not past the queue's own ends)
@@ -906,6 +913,7 @@ export class ConnectReceiver {
 
 	// What the player did
 	onPlayerEvent(event: PlayerEvent) {
+		if (event.type === "takenOver") this.takeovers++;
 		return this.serial(() => this.handlePlayerEvent(event), `player ${event.type}`);
 	}
 	private async handlePlayerEvent(event: PlayerEvent) {
