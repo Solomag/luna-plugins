@@ -38,7 +38,9 @@ export type PlayerEvent =
 	| { type: "next" }
 	| { type: "previous" }
 	// The desktop user pressed play on the phone's media that ended or could not be loaded, played like the phone's play
-	| { type: "play" };
+	| { type: "play" }
+	// The desktop user played something of their own (another album or track): the phone's media stopped, the player is let go
+	| { type: "takenOver" };
 
 type Json = Record<string, any>;
 
@@ -945,6 +947,14 @@ export class ConnectReceiver {
 				return this.step(-1, false);
 			case "play":
 				return this.play();
+			case "takenOver":
+				// Like the phone's stop, the queue stays for the phone's next or a new load (which takes the player again)
+				this.log("the desktop played its own media");
+				this.media = undefined;
+				this.setPlayerState("IDLE");
+				this.finished = true;
+				this.options.toPlayer({ type: "release" });
+				return;
 		}
 	}
 

@@ -367,6 +367,17 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		// TIDAL sends no player signal for videos, their progress comes from the video element (media events don't bubble)
 		redux.intercept("playbackControls/MEDIA_PRODUCT_TRANSITION", sessionUnloads, ({ mediaProduct }) => {
 			playingVideo = mediaProduct.productType === "video";
+			// The desktop user played their own album or track (TIDAL's queue replaced, not by a load here):
+			// it is not the phone's media, the phone is told it stopped and the player is let go (TIDAL's own next, end and repeat)
+			const phoneElement = phoneUid ?? routedUid;
+			const { referenceId } = mediaProduct;
+			if (!loading && phoneElement !== undefined && referenceId !== undefined && referenceId !== phoneElement) {
+				stopPendingSeek?.();
+				// Told once (the release follows)
+				routedUid = ended = current = phoneUid = loaded = undefined;
+				loadFailed = false;
+				playerEvent({ type: "takenOver" });
+			}
 		});
 		const onVideoTime = ({ target }: Event) => {
 			if (!(target instanceof HTMLVideoElement) || !playingVideo || unstarted || stopPendingSeek !== undefined) return;
