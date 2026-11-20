@@ -103,7 +103,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	const run = async (command: PlayerCommand) => {
 		switch (command.type) {
 			case "load":
-				return load(command.mediaId, command.mediaType, command.autoplay);
+				return load(command.mediaId, command.mediaType, command.autoplay, false, command.positionMs / 1000);
 			case "play":
 				return play();
 			case "pause":
@@ -128,12 +128,11 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		if (loadFailed) {
 			if (current === undefined) return;
 			// Where the phone is: a resumed position, or its seeks meanwhile
-			const at = positionS;
-			return load(current.mediaId, current.mediaType, true).then(() => at > 0 && seek(at));
+			return load(current.mediaId, current.mediaType, true, false, positionS);
 		}
 		if (ended !== undefined) {
 			const { mediaId, mediaType, seek: time } = ended;
-			return load(mediaId, mediaType, true).then(() => time !== undefined && seek(time));
+			return load(mediaId, mediaType, true, false, time);
 		}
 		paused = false;
 		pauseWhenPlaying = false;
@@ -167,8 +166,9 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		PlayState.seek(time);
 	};
 
-	// resumed: loaded again for a resumed session, a failure does not skip it (it played before, the network may just be back)
-	const load = async (mediaId: string, mediaType: number, autoplay: boolean, resumed = false) => {
+	// resumed: loaded again for a resumed session, a failure does not skip it (it played before, the network may just be back).
+	// at: where it starts, sought before the play (TIDAL may start a video at once, a seek after that is ignored)
+	const load = async (mediaId: string, mediaType: number, autoplay: boolean, resumed = false, at = 0) => {
 		stopPendingSeek?.();
 		ended = undefined;
 		current = { mediaId, mediaType };
@@ -176,10 +176,10 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		// Repeat one or the phone selecting the item playing: replacing the queue with the same item may keep TIDAL's old position
 		if (!loadFailed && loaded?.mediaId === mediaId && currentElement()?.uid === loaded.uid) {
 			attach();
-			// From the start, not where the phone's earlier seek waits for it to start
-			unstarted = false;
+			// From the start, not where the phone's earlier seek waits for it to start (a seek after this load still waits)
 			phoneSeek = undefined;
 			PlayState.seek(0);
+			if (at > 0) seek(at);
 			if (autoplay) play();
 			else {
 				pause();
@@ -200,6 +200,8 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		loadFailed = !mediaItem;
 		loaded = phoneUid = undefined;
 		if (!mediaItem) {
+			// Where a play loads it again
+			positionS = at > 0 ? at : 0;
 			// What plays is not the phone's media: the previous one of the phone's, or the desktop's own after a resumed session
 			if (!resumed) PlayState.pause();
 			const unavailable = mediaItem === null && !resumed;
@@ -227,6 +229,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		const uid = currentElement()?.uid;
 		if (uid !== undefined) loaded = { mediaId, uid };
 		phoneUid = uid;
+		if (at > 0) seek(at);
 		if (autoplay) play();
 		// Not started, tell the phone it is ready (TIDAL reported it while loading)
 		else playerEvent({ type: "state", state: "PAUSED" });
@@ -241,8 +244,7 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 			playerEvent({ type: "state", state: ended === undefined && PlayState.playing ? "PLAYING" : "PAUSED" });
 			return;
 		}
-		await load(mediaId, mediaType, false, true);
-		if (positionMs > 0) seek(positionMs / 1000);
+		await load(mediaId, mediaType, false, true, positionMs / 1000);
 	};
 
 	// Only one seek waits, a newer one or a new load replaces it
@@ -384,13 +386,23 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 		redux.intercept("playbackControls/SEEK", sessionUnloads, (time) => {
 			stopPendingSeek?.();
 			if (unstarted) phoneSeek = time;
+			// Ended: where a play loads it again, like the phone's seek
+			if (ended !== undefined) ended.seek = time;
 			// Also paused (TIDAL reports no position then)
-			if (ended === undefined) progress(time, true);
+			else progress(time, true);
 		});
+		// The player's position once it moved (its time before it started is not the phone's media's).
+		// TIDAL's state, PlayState.currentTime keeps reading the first player (a track's after a video)
+		let seekedTimeout: number | undefined;
+		sessionUnloads.add(() => clearTimeout(seekedTimeout));
 		for (const action of ["playbackControls/SEEK_BACKWARDS", "playbackControls/SEEK_FORWARDS"] as const)
 			redux.intercept(action, sessionUnloads, () => {
 				stopPendingSeek?.();
 				if (unstarted) phoneSeek = undefined;
+				clearTimeout(seekedTimeout);
+				seekedTimeout = window.setTimeout(() => {
+					if (ended === undefined && !unstarted) progress(PlayState.playbackControls.latestCurrentTime, true);
+				}, 500);
 			});
 		redux.intercept("playbackControls/SKIP_PREVIOUS", sessionUnloads, () => {
 			stopPendingSeek?.();

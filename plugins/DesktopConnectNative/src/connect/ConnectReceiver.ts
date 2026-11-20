@@ -11,7 +11,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 // Sent to the player (the renderer)
 export type PlayerCommand =
-	| { type: "load"; mediaId: string; mediaType: number; autoplay: boolean }
+	// positionMs: where it starts, part of the load (a seek sent after it may come too late for a media TIDAL starts at once)
+	| { type: "load"; mediaId: string; mediaType: number; autoplay: boolean; positionMs: number }
 	| { type: "play" }
 	| { type: "pause" }
 	| { type: "seek"; positionMs: number }
@@ -868,8 +869,7 @@ export class ConnectReceiver {
 		this.log("media", media.mediaId, media.itemId);
 		this.toSession(this.mediaChanged(media));
 		this.setPlayerState("BUFFERING");
-		this.options.toPlayer({ type: "load", mediaId: media.mediaId, mediaType: media.mediaType, autoplay });
-		if (positionMs !== 0) this.options.toPlayer({ type: "seek", positionMs });
+		this.options.toPlayer({ type: "load", mediaId: media.mediaId, mediaType: media.mediaType, autoplay, positionMs });
 	}
 
 	// TIDAL's phone app parses every field with a fixed type: no nulls
