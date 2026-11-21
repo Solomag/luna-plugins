@@ -21,3 +21,10 @@ and pause work.
 ## Firewall
 The phone connects to the port shown in the plugin's settings (the first free port from 9000).
 Allow it in the PC's firewall: for the local network, and for the Tailscale adapter if you use one.
+
+## Allowed addresses
+The receiver has no login: whoever reaches its port can take over the session and control the player.
+So it lets in only the local network (10/8, 172.16/12, 192.168/16, link-local, IPv6 unique local and
+link-local), the PC itself and Tailscale (100.64.0.0/10), and drops other connections before TLS.
+For a port forwarded from the internet, add the phone's addresses or ranges under **Allowed addresses**
+(like `203.0.113.5, 198.51.100.0/24`). **Allow any address** lets everyone in.
