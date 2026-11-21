@@ -17,9 +17,11 @@ type Running = { receiver: ConnectReceiver; responder: Responder; service?: Ciao
 type Access = { allows: (address: string | undefined) => boolean };
 // The TIDAL accounts (user ids) whose phones may use the receiver, replaced when the computer's account or the setting changes
 type Accounts = { allows: (userId: string) => boolean };
+// User ids are numbers: "0123" is 123
+const accountKey = (id: string) => id.trim().replace(/^0+(?=\d)/, "");
 const accountFilter = (userIds: string[], anyAccount: boolean) => {
-	const allowed = new Set(userIds.map((id) => id.trim()).filter((id) => id !== "" && id !== "0"));
-	return (userId: string) => anyAccount || allowed.has(userId);
+	const allowed = new Set(userIds.map(accountKey).filter((id) => id !== "" && id !== "0"));
+	return (userId: string) => anyAccount || allowed.has(accountKey(userId));
 };
 declare const luna: { __desktopConnectNativeReceiver?: Running; __desktopConnectNativeChange?: Promise<unknown> };
 
@@ -181,7 +183,8 @@ export const setAllowedAddresses = (allowedAddresses: string, allowAnyAddress: b
 export const setAllowedAccounts = (accountIds: string[], anyAccount: boolean) =>
 	oneAtATime(async () => {
 		const current = running.__desktopConnectNativeReceiver;
-		if (current !== undefined) current.accounts.allows = accountFilter(accountIds, anyAccount);
+		// A receiver started by an older version (kept across a plugin reload) has no account check
+		if (current?.accounts !== undefined) current.accounts.allows = accountFilter(accountIds, anyAccount);
 	});
 
 // The TIDAL accounts a phone was refused for since the receiver started

@@ -110,7 +110,8 @@ export type ReceiverOptions = {
 
 // Answers the token's account: {"userId": 123, "countryCode": ..., ...}
 export const tidalAccountUrl = "https://api.tidal.com/v1/sessions";
-const accountTimeoutMs = 10_000;
+// Short: the check runs in turn with the commands, the held session waits for it
+const accountTimeoutMs = 4_000;
 
 export const serviceInfoPath = "/tidalconnect/service";
 export type ServiceInfo = { name: string; type: string; port: number; txt: Record<string, string> };
@@ -319,6 +320,7 @@ export class ConnectReceiver {
 		this.stopped = true;
 		clearInterval(this.pingTimer);
 		clearTimeout(this.volumeTimer);
+		this.waiting.clear();
 		this.endSession(false);
 		for (const socket of this.sockets.keys()) socket.terminate();
 		this.wss.close();
@@ -569,7 +571,9 @@ export class ConnectReceiver {
 		const id = randomUUID();
 		// A phone that started before and still waits starts again
 		this.waiting.delete(socket);
-		if (this.options.isAllowedAccount !== undefined) {
+		// A phone of the session held was checked already
+		const member = this.session?.members.has(socket) === true;
+		if (this.options.isAllowedAccount !== undefined && !member) {
 			this.waiting.set(socket, { id });
 			this.log("session waits for the phone's TIDAL account", id);
 			return this.send(socket, { command: "notifySessionStarted", sessionId: id, joined: false });
@@ -594,8 +598,8 @@ export class ConnectReceiver {
 		} catch (err) {
 			this.log("could not ask TIDAL for the phone's account", err);
 		}
-		// Closed or started again meanwhile
-		if (this.waiting.get(socket) !== waiting) return 1002;
+		// Closed, started again or the receiver stopped meanwhile
+		if (this.stopped || this.waiting.get(socket) !== waiting) return 1002;
 		this.waiting.delete(socket);
 		if (userId !== undefined && this.options.isAllowedAccount!(userId)) {
 			this.log("the phone's TIDAL account", userId, "is allowed");
@@ -604,10 +608,10 @@ export class ConnectReceiver {
 			this.sendVolume(socket);
 			return true;
 		}
-		const account = userId ?? "unknown";
-		if (!this.refusedAccounts.has(account)) {
-			this.refusedAccounts.add(account);
-			this.log("Refused a phone of TIDAL account", account, "(not an allowed account)");
+		if (userId === undefined) this.log("Refused a phone: TIDAL did not tell its account");
+		else if (!this.refusedAccounts.has(userId)) {
+			this.refusedAccounts.add(userId);
+			this.log("Refused a phone of TIDAL account", userId, "(not an allowed account)");
 		}
 		this.send(socket, { command: "notifySessionEnded", sessionId: waiting.id, suspended: false });
 		socket.close();
@@ -626,7 +630,7 @@ export class ConnectReceiver {
 		return typeof userId === "number" || (typeof userId === "string" && userId !== "") ? String(userId) : undefined;
 	}
 
-	// The TIDAL accounts a phone was refused for ("unknown" when TIDAL did not tell)
+	// The TIDAL accounts a phone was refused for
 	get refusedTidalAccounts() {
 		return [...this.refusedAccounts];
 	}
