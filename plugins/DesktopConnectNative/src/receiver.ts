@@ -531,7 +531,10 @@ export const startOwnReceiver = async (unloads: Set<LunaUnload>) => {
 	// TIDAL's queue, the phone is given a cloud queue of it (it shows only its queue's items). A long one only around the current entry
 	const desktopQueue = (): DesktopQueueItem[] => {
 		const { elements, currentIndex } = PlayState.playQueue;
-		const start = elements.length <= mirrorQueueSize ? 0 : Math.min(Math.max(0, currentIndex - mirrorQueueBefore), elements.length - mirrorQueueSize);
+		// The part moves in steps (not with each track, each move is a new cloud queue): it starts at a multiple of the step,
+		// the current entry with at least mirrorQueueBefore entries before it (where there are)
+		const step = mirrorQueueSize - mirrorQueueBefore;
+		const start = Math.max(0, Math.min(Math.floor(Math.max(0, currentIndex - mirrorQueueBefore) / step) * step, elements.length - mirrorQueueSize));
 		const mediaItems = redux.store.getState().content?.mediaItems ?? {};
 		return elements.slice(start, start + mirrorQueueSize).map((element: redux.PlayQueueElement) => ({
 			elementId: element.uid,

@@ -1118,10 +1118,9 @@ export class ConnectReceiver {
 	// Not waited for: a queue server that is slow does not hold the phone's commands
 	private makeMirrorQueue(queue: DesktopQueueItem[]) {
 		const signature = queue.map((item) => item.elementId).join(",");
-		if (signature === this.mirrorQueue?.signature || signature === this.mirrorQueueMaking) return;
-		// The one being made is followed by the latest one asked for meanwhile
-		if (this.mirrorQueueMaking !== undefined) return void (this.mirrorQueueNext = queue);
-		if (this.queueServer === undefined) return;
+		// The one being made is followed by the latest one asked for meanwhile (none when that is the one being made)
+		if (this.mirrorQueueMaking !== undefined) return void (this.mirrorQueueNext = signature === this.mirrorQueueMaking ? undefined : queue);
+		if (signature === this.mirrorQueue?.signature || this.queueServer === undefined) return;
 		this.mirrorQueueMaking = signature;
 		const generation = this.mirrorGeneration;
 		this.createMirrorQueue(queue, signature, generation)
@@ -1158,9 +1157,13 @@ export class ConnectReceiver {
 		// The items come back in the order sent, each with its id
 		let items: Json[] = Array.isArray(created.items) ? created.items : [];
 		if (items.length < entries.length) {
-			const page = await this.queueRequest("GET", `${server.serverUrl}/${queueId}/items?offset=0&limit=${entries.length}`);
+			// Failing, the queue is given as it came (its items not named are by their element): not made again for each media
+			const page = await this.queueRequest("GET", `${server.serverUrl}/${queueId}/items?offset=0&limit=${entries.length}`).catch((err) => {
+				this.log("mirror queue items failed", err);
+				return undefined;
+			});
 			if (generation !== this.mirrorGeneration || !this.mirroring) return;
-			if (Array.isArray(page.items)) items = page.items;
+			if (Array.isArray(page?.items)) items = page.items;
 		}
 		const itemIds = new Map<string, string>();
 		entries.forEach((entry, index) => {
