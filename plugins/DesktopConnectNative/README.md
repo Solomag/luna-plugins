@@ -5,9 +5,11 @@ receiver, so no TIDAL binary is needed.
 
 ## Playing on the PC while the phone is connected
 If you play your own album or track on the PC while the phone is connected, the phone shows what
-the PC plays: the title, the artist, the album, the duration, the position, and whether it plays or
-is paused. The phone's play, pause, seek, next and previous then control the PC's own queue. The
-phone's queue list still shows the phone's queue. Picking a track there, or starting something new
+the PC plays: the track with its cover, the position, and whether it plays or is paused. The phone's
+play, pause, seek, next and previous then control the PC's own queue.
+The TIDAL phone app shows only tracks of its cloud queue, so the receiver creates a cloud queue of
+the PC's queue (up to 500 tracks around the current one) with the phone's login and gives it to the phone.
+The phone's queue list then shows the PC's queue. Picking a track there, or starting something new
 on the phone, gives the player back to the phone.
 
 ## Only on the same local network
