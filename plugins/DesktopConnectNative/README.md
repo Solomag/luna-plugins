@@ -3,6 +3,13 @@
 Remote control TIDAL Desktop from the TIDAL phone app with TIDAL Connect. The plugin runs its own
 receiver, so no TIDAL binary is needed.
 
+## Playing on the PC while the phone is connected
+If you play your own album or track on the PC while the phone is connected, the phone shows what
+the PC plays: the title, the artist, the album, the duration, the position, and whether it plays or
+is paused. The phone's play, pause, seek, next and previous then control the PC's own queue. The
+phone's queue list still shows the phone's queue. Picking a track there, or starting something new
+on the phone, gives the player back to the phone.
+
 ## Only on the same local network
 The TIDAL app finds the receiver with mDNS, which only works on the local network (Wi-Fi).
 It does not work over Tailscale or another VPN when the phone is on mobile data. Android does no
