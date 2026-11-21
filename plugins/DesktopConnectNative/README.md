@@ -30,10 +30,23 @@ and pause work.
 ## Firewall
 The phone connects to the port shown in the plugin's settings (the first free port from 9000).
 Allow it in the PC's firewall: for the local network, and for the Tailscale adapter if you use one.
+Several TIDAL profiles (or TidaLuna next to TidaLunar) take the next ports, so allow a range, in
+PowerShell as administrator:
+
+```powershell
+New-NetFirewallRule -DisplayName "TidaLuna Connect" -Direction Inbound -Protocol TCP -LocalPort 9000-9019 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow -Profile Any
+```
+
+## TIDAL accounts
+Only a phone signed in to the same TIDAL account as the PC can use the receiver. The phone sends its
+TIDAL login with its first queue, and the receiver asks TIDAL whose it is before the phone's session
+starts. Until then the phone controls nothing, and a phone that is already connected keeps its session.
+A phone of another account is let go. To let other accounts in, add their TIDAL user ids under
+**Other TIDAL accounts**: the settings list the accounts refused since TIDAL started. **Any TIDAL
+account** turns the check off.
 
 ## Allowed addresses
-The receiver has no login: whoever reaches its port can take over the session and control the player.
-So it lets in only the local network (10/8, 172.16/12, 192.168/16, link-local, IPv6 unique local and
-link-local), the PC itself and Tailscale (100.64.0.0/10), and drops other connections before TLS.
+Before the account check, the receiver lets in only the local network (10/8, 172.16/12, 192.168/16,
+link-local, IPv6 unique local and link-local), the PC itself and Tailscale (100.64.0.0/10), and drops other connections before TLS.
 For a port forwarded from the internet, add the phone's addresses or ranges under **Allowed addresses**
 (like `203.0.113.5, 198.51.100.0/24`). **Allow any address** lets everyone in.
