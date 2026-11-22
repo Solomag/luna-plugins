@@ -37,6 +37,13 @@ PowerShell as administrator:
 New-NetFirewallRule -DisplayName "TidaLuna Connect" -Direction Inbound -Protocol TCP -LocalPort 9000-9019 -RemoteAddress LocalSubnet,100.64.0.0/10 -Action Allow -Profile Any
 ```
 
+## Luna's permission prompts
+The receiver's network server runs in TIDAL's main process, so Luna asks once whether to allow its
+system access (network, files, system info, UDP for mDNS). Luna asks again only when an update
+changes that native part. It is kept small (`receiver.native.ts`, `connect/PhoneServer.ts`,
+`connect/http.ts`, `connect/allowedAddresses.ts`): the TIDAL Connect protocol runs in the page,
+so most updates do not ask again.
+
 ## TIDAL accounts
 Only a phone signed in to the same TIDAL account as the PC can use the receiver. The phone sends its
 TIDAL login with its first queue, and the receiver asks TIDAL whose it is before the phone's session
